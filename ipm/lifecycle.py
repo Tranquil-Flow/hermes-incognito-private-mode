@@ -375,6 +375,7 @@ def run_sweep(paths: CapturedPaths, batch_limit: int = MAX_BATCH) -> dict[str, i
         gen = store.current_generation(meta)
         ledger = store.read("ledger", paths.data_dir)
         candidates: list[str] = []
+        changed_entries: dict[str, dict[str, Any]] = {}
         for key, entry in ledger.items():
             if not isinstance(entry, dict):
                 continue
@@ -384,20 +385,32 @@ def run_sweep(paths: CapturedPaths, batch_limit: int = MAX_BATCH) -> dict[str, i
                 if ok:
                     entry["state"] = "armed"
                     counts["armed"] += 1
+                    changed_entries[key] = entry
                 else:
                     if why in {"row predates the arming generation", "messages predate the arming generation",
                                "user kept this chat"}:
                         entry["state"] = "excluded"
                         entry["excluded_reason"] = why
                         counts["dropped"] += 1
+                        changed_entries[key] = entry
                     elif why in {"missing timestamps"} and entry.get("row_missing_at"):
                         # Candidate whose row never appeared: drop it silently.
                         counts["dropped"] += 1
                 continue
             if state == "armed":
                 candidates.append(key)
-        if counts["armed"]:
-            store.mutate("ledger", paths.data_dir, lambda l: ledger)
+        if changed_entries:
+            # Merge ONLY the entries this sweep changed (never write a stale
+            # whole-file snapshot — other processes sweep concurrently).
+            def apply(l: dict[str, Any]) -> dict[str, Any]:
+                for k, v in changed_entries.items():
+                    current = l.get(k)
+                    if isinstance(current, dict) and current.get("state") == "candidate":
+                        l[k] = v
+                return l
+            store.mutate("ledger", paths.data_dir, apply)
+            # Entries armed in THIS pass are deletable in the same sweep.
+            candidates.extend(k for k, v in changed_entries.items() if v.get("state") == "armed")
 
         for key in candidates[:batch_limit]:
             entry = ledger.get(key) or {}
@@ -576,8 +589,10 @@ def cleanup_session_files(paths: CapturedPaths, ids: list[str]) -> int:
         names = [f"{sid}.json", f"{sid}.jsonl", f"session_{sid}.json"]
         for name in names:
             p = sessions_dir / name
+            if not p.exists():
+                continue  # count only real removals, never attempts
             try:
-                p.unlink(missing_ok=True)
+                p.unlink()
                 removed += 1
             except OSError:
                 pass

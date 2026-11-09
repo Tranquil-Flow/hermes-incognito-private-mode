@@ -72,7 +72,7 @@
     },
     {
       "id": "nous-portal",
-      "match": {"base_url_hosts": [], "provider_ids": ["nous", "nous-portal", "nousresearch"], "auth": "any"},
+      "match": {"base_url_hosts": ["api.nousresearch.com", "inference-api.nousresearch.com", "inference.nousresearch.com"], "provider_ids": ["nous", "nous-portal", "nousresearch"], "auth": "any"},
       "verdict": "PER_REQUEST",
       "flags": {"kind": "provider_routing", "data_collection": "deny", "zdr": true},
       "account_setting": "Nous Portal Privacy Mode — enable once in the Portal, then confirm in setup.",

@@ -20,8 +20,10 @@ from typing import Any, Callable
 TARGET_LOGGERS = ("gateway.run", "agent.turn_context", "hermes.tool_calls")
 _MARKER = "_ipm_private_filter"
 
-# Rendered f-string / %r fallback: msg='...' possibly with escapes.
+# Rendered f-string / %r fallback: msg='...' possibly with escapes; or unquoted
+# f-string text (msg=sentinel) running to whitespace/end.
 _MSG_RENDERED_RE = re.compile(r"(\bmsg=)(['\"])(?:\\.|(?!\2).)*\2")
+_MSG_UNQUOTED_RE = re.compile(r"(\bmsg=)([^\s]+(?:\s+(?!\w+=)[^\s=]+)*)")
 _REPLY_TEXT_RE = re.compile(r"(\breply_to_text=)(['\"])(?:\\.|(?!\2).)*\2")
 
 
@@ -66,6 +68,8 @@ class PrivateLogFilter(logging.Filter):
         except Exception:
             return
         new = _MSG_RENDERED_RE.sub(r"\1\2[redacted]\2", rendered)
+        if new == rendered:
+            new = _MSG_UNQUOTED_RE.sub(r"\1[redacted]", rendered)
         new = _REPLY_TEXT_RE.sub(r"\1\2[redacted]\2", new)
         if new != rendered:
             record.msg = new

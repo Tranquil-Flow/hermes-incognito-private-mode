@@ -37,35 +37,40 @@ def has_memory_block(text: str) -> bool:
 
 
 def strip_memory_blocks(text: str) -> tuple[str, int]:
-    """Remove whole blocks (rule+header+rule+entries) from *text*; returns (text, count)."""
+    """Remove whole blocks (rule+header+rule+entries) from *text*; returns (text, count).
+
+    Block span: from the rule line above a header to the earliest of (a) the next
+    rule line, (b) the first blank line after the entries begin (canonical
+    store entries contain no blank lines), (c) end of text. Never removes past
+    a following section that carries no marker.
+    """
     if not isinstance(text, str) or not text:
         return text, 0
     lines = text.split("\n")
-    # Block starts: index of the rule line directly above a header line.
     starts: list[int] = []
     for i, line in enumerate(lines):
         if i > 0 and MEMORY_TITLE_RE.match(line.strip()) and RULE_RE.match(lines[i - 1].strip()):
             starts.append(i - 1)
     if not starts:
         return text, 0
-    # A block runs from its first rule through the entries until the next block's
-    # first rule (which sits right above the next header) or end of text.
-    ranges: list[tuple[int, int]] = []
+    skip: set[int] = set()
     for idx, start in enumerate(starts):
-        end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
-        ranges.append((start, end))
-    keep: list[str] = []
-    skip_ranges = set()
-    for start, end in ranges:
+        end = len(lines)
+        # boundary candidates after the entries' second rule (start+2)
+        for j in range(start + 3, len(lines)):
+            stripped = lines[j].strip()
+            if RULE_RE.match(stripped):
+                end = j  # next rule: another block or a decorated section
+                break
+            if stripped == "":
+                end = j  # section join (\n\n): entries never contain blank lines canonically
+                break
         for i in range(start, end):
-            skip_ranges.add(i)
-    for i, line in enumerate(lines):
-        if i in skip_ranges:
-            continue
-        keep.append(line)
-    out = "\n".join(keep)
+            skip.add(i)
+    kept = [line for i, line in enumerate(lines) if i not in skip]
+    out = "\n".join(kept)
     out = re.sub(r"\n{3,}", "\n\n", out).strip("\n")
-    return out, len(ranges)
+    return out, len(starts)
 
 
 def has_memory_context_span(text: str) -> bool:
@@ -240,24 +245,10 @@ def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             ensure_copy()["system"] = new_system
     messages = request.get("messages")
     if isinstance(messages, list):
-        new_messages = None
-        for i, msg in enumerate(messages):
-            if not isinstance(msg, dict) or msg.get("role") != "user":
-                continue
-            for j, part in enumerate(msg.get("content") or []):
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    text2, s = strip_memory_context_spans(part["text"])
-                    if s:
-                        counts["spans"] += s
-                        new_messages = list(messages) if new_messages is None else new_messages
-                        new_messages[i] = {
-                            **msg,
-                            "content": [
-                                ({**p, "text": text2} if k == j else p)
-                                for k, p in enumerate(msg["content"])
-                            ],
-                        }
-        if new_messages is not None:
-            ensure_copy()["messages"] = new_messages
+        # NOTE: the chat_completions pass above already strips spans from user
+        # messages in BOTH chat_completions and anthropic_messages shapes (both
+        # carry a `messages` list; anthropic only adds `system`). A second pass
+        # here would double-count and clobber the copy.
+        pass
 
     return new_request, counts

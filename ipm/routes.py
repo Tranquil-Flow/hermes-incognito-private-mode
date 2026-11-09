@@ -121,7 +121,7 @@ def _host_known(host: str, rows: list[dict[str, Any]]) -> bool:
 
 
 def _row_matches(row: dict[str, Any], *, host: str, provider: str | None, auth_hint: str | None,
-                 model: str | None, api_mode: str | None) -> bool:
+                 model: str | None, api_mode: str | None, all_rows: list[dict[str, Any]] | None = None) -> bool:
     match = row.get("match") or {}
     hosts = {h.lower() for h in (match.get("base_url_hosts") or [])}
     provider_ids = {p.lower() for p in (match.get("provider_ids") or [])}
@@ -129,10 +129,11 @@ def _row_matches(row: dict[str, Any], *, host: str, provider: str | None, auth_h
         if host not in hosts:
             return False
     else:
-        # No curated host: provider-id match only, and only over a host this table knows.
+        # No curated host: provider-id match only, and only over a host this table
+        # knows (endpoint host is authoritative; §3.7).
         if not provider_ids or (provider or "").lower() not in provider_ids:
             return False
-        if not _host_known(host, [row]):
+        if not _host_known(host, all_rows if all_rows is not None else [row]):
             return False
     if provider_ids and (provider or "").lower() not in provider_ids:
         return False
@@ -166,7 +167,7 @@ def classify(provider: str | None, base_url: str | None, api_mode: str | None = 
     rows = table.get("rows", [])
     host = host_of(base_url)
     candidates = [r for r in rows if _row_matches(r, host=host, provider=provider, auth_hint=auth_hint,
-                                                  model=model, api_mode=api_mode)]
+                                                   model=model, api_mode=api_mode, all_rows=rows)]
     confirmed_ids: set[str] = set()
     if confirmations:
         for cid, conf in confirmations.items():
