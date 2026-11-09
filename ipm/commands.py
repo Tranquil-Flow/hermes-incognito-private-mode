@@ -244,13 +244,15 @@ def run_setup(paths=None) -> int:
 # --- CLI subcommand ----------------------------------------------------------
 
 def cli_register(setup_fn) -> None:
-    """setup_fn receives the argparse subparser (register_cli_command contract)."""
-    sub = setup_fn.add_parser("incognito-private-mode", help="Private Mode, honestly (provider flags, memory strip, vetoes, consent-gated history removal)")
-    csub = sub.add_subparsers(dest="ipm_command")
-    csub.add_parser("status", help="Show mode, coverage lines, routes, queue, what stays")
-    csub.add_parser("cleanup", help="Run one sweep now and print per-session outcomes (hashed ids)")
-    csub.add_parser("deep-clean", help="Show DB size, free disk and the manual deep-clean steps")
-    csub.add_parser("setup", help="Guided setup (TTY only); records cleanup consent")
+    """setup_fn receives THIS plugin's argparse parser (main.py builds it named
+    ``incognito-private-mode``); we add our own subcommand tree onto it."""
+    setup_fn.help = "Private Mode, honestly: status, cleanup, deep-clean, setup"
+    setup_fn.description = "Private Mode, honestly (provider flags, memory strip, vetoes, consent-gated history removal)"
+    sub = setup_fn.add_subparsers(dest="ipm_command")
+    sub.add_parser("status", help="Show mode, coverage lines, routes, queue, what stays")
+    sub.add_parser("cleanup", help="Run one sweep now and print per-session outcomes (hashed ids)")
+    sub.add_parser("deep-clean", help="Show DB size, free disk and the manual deep-clean steps")
+    sub.add_parser("setup", help="Guided setup (TTY only); records cleanup consent")
 
 
 def cli_handler(args, **_kw: Any) -> int:
