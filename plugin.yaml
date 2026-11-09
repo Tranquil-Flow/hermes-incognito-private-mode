@@ -1,0 +1,60 @@
+name: incognito-private-mode
+version: 0.3.0
+description: "Private Mode, honestly: provider privacy flags, memory stripping from requests, tool vetoes, honest coverage labels, and consent-gated fenced history cleanup."
+author: "Tranquil-Flow"
+license: "AGPL-3.0"
+requires_hermes: ">=0.22.5"
+platforms: [macos, linux]
+provides_hooks:
+  - pre_tool_call
+  - on_session_start
+  - on_session_finalize
+  - on_session_delete
+  - post_compaction
+  - subagent_start
+  - pre_auxiliary_call
+  - transform_api_error_classification
+provides_middleware:
+  - llm_request
+  - llm_execution
+config_schema:
+  mode:
+    type: str
+    default: private
+    description: "private | off. off disables every protection for chats that are not forced on."
+  apply_to_platforms:
+    type: list
+    default: [cli, tui, desktop]
+    description: "Surfaces where history cleanup may run. Provider flags, memory strip and tool vetoes apply on all platforms while mode != off."
+  remove_history_on_close:
+    type: bool
+    default: true
+    description: "Remove closed private chats from Hermes history. Deletion additionally requires recorded setup consent."
+  keep_history:
+    type: bool
+    default: false
+    description: "When true, new chats are kept in history (session_search allowed) and excluded from cleanup."
+  use_memory:
+    type: bool
+    default: false
+    description: "When false, recognised memory blocks and <memory-context> spans are stripped from outgoing main-chat requests."
+  save_memory:
+    type: bool
+    default: false
+    description: "When false, the memory tool is blocked in private chats."
+  learn_skills:
+    type: bool
+    default: false
+    description: "When false, skill_manage is blocked in private chats."
+  allow_unverified:
+    type: bool
+    default: true
+    description: "Allow requests on routes whose retention is unverified (labelled with a warning)."
+  block_training:
+    type: bool
+    default: true
+    description: "Block requests to routes that train with no opt-out."
+  deep_clean_reminder:
+    type: str
+    default: weekly
+    description: "off | weekly | monthly. Reminder that deleted bytes remain in free database pages until a deep clean."
