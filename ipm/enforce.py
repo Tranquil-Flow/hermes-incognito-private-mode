@@ -10,7 +10,9 @@ open). Never call next_call when blocked.
 from __future__ import annotations
 
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 from . import routes as routes_mod
@@ -117,6 +119,15 @@ def _memory_strip_active(settings: dict[str, Any], entry: dict[str, Any] | None)
 
 def on_llm_request(**kwargs: Any):
     """``llm_request`` middleware. Returns {"request": new} or None."""
+    dbg = os.environ.get("IPM_DEBUG")
+    if dbg:
+        try:
+            _p = capture_paths()
+            Path(_p.data_dir).mkdir(parents=True, exist_ok=True)
+            (Path(_p.data_dir) / "trace.txt").open("a").write(
+                f"llm_request enter sid={bool(kwargs.get('session_id'))} req={isinstance(kwargs.get('request'), dict)}\n")
+        except Exception:
+            pass
     try:
         request = kwargs.get("request")
         if not isinstance(request, dict):
@@ -124,6 +135,12 @@ def on_llm_request(**kwargs: Any):
         paths = capture_paths()
         settings = read_settings(paths)
         ledger, entry = _session_state(kwargs.get("session_id"), paths.data_dir)
+        if dbg:
+            try:
+                (Path(paths.data_dir) / "trace.txt").open("a").write(
+                    f"  mode={settings.get('mode')} entry={bool(entry)} active={provider_controls_active(settings, entry)}\n")
+            except Exception:
+                pass
         if not provider_controls_active(settings, entry):
             return None
         # Lazy observation for sessions we never saw start: tombstone only (§3.3).
@@ -156,6 +173,13 @@ def on_llm_request(**kwargs: Any):
                     "reason": trace.get("reason") or "private mode flags/strip"}
         return None
     except Exception as exc:
+        if os.environ.get("IPM_DEBUG"):
+            try:
+                dbg_dir = capture_paths().data_dir
+                (Path(dbg_dir) / "last_error.txt").write_text(
+                    f"llm_request: {type(exc).__name__}\n")
+            except Exception:
+                pass
         logger.debug("ipm: llm_request middleware skipped (%s)", type(exc).__name__)
         return None  # fail open here; llm_execution re-checks the final request
 
@@ -166,52 +190,55 @@ def on_llm_execution(**kwargs: Any):
     - ⚠️ route and not allow_unverified -> block
     - required flag missing after second chance -> block
     - memory block present with use_memory=false -> block
+
+    next_call is invoked exactly once, OUTSIDE the guarded section: a downstream
+    provider error must propagate as-is (never re-run the call, never swallow).
     """
     next_call = kwargs.get("next_call")
     request = kwargs.get("request")
+    if not isinstance(request, dict) or not callable(next_call):
+        return next_call(request) if callable(next_call) else None
+    block_message: str | None = None
+    payload = request
     try:
-        if not isinstance(request, dict) or not callable(next_call):
-            return next_call(request) if callable(next_call) else None
         paths = capture_paths()
         settings = read_settings(paths)
         ledger, entry = _session_state(kwargs.get("session_id"), paths.data_dir)
         if not provider_controls_active(settings, entry):
-            return next_call(request)
-        confirmations = _confirmations(paths.data_dir)
-        verdict = _classify(request, kwargs, settings, confirmations, "execution")
+            payload = request  # passthrough
+        else:
+            confirmations = _confirmations(paths.data_dir)
+            verdict = _classify(request, kwargs, settings, confirmations, "execution")
 
-        block_reason: str | None = None
-        if verdict.label == "block" and settings.get("block_training", True):
-            block_reason = "; ".join(verdict.reasons) or "route trains with no opt-out"
-        elif verdict.label in {"warn", "needs-confirmation"} and not settings.get("allow_unverified", True):
-            block_reason = "; ".join(verdict.reasons) or "route not verified for privacy"
-        elif verdict.label == "ok-if-flagged":
-            required = verdict.flags.get("kind")
-            if required == "provider_routing" and not transforms.flags_present(request):
-                # second chance: apply on the execution payload (copy-on-write)
-                request, _tr = transforms.apply_provider_routing(request)
-                if not transforms.flags_present(request):
-                    block_reason = "required privacy flag missing"
-            elif required == "verify_store_false" and not transforms.verify_store_false(request):
-                block_reason = "Responses request missing store:false"
-        elif verdict.label == "ok" or verdict.label == "confirmed":
-            if verdict.flags.get("kind") == "provider_routing" and not transforms.flags_present(request):
-                request, _tr = transforms.apply_provider_routing(request)
+            if verdict.label == "block" and settings.get("block_training", True):
+                block_message = _block_message(verdict, "; ".join(verdict.reasons) or "route trains with no opt-out")
+            elif verdict.label in {"warn", "needs-confirmation"} and not settings.get("allow_unverified", True):
+                block_message = _block_message(verdict, "; ".join(verdict.reasons) or "route not verified for privacy")
+            elif verdict.label == "ok-if-flagged":
+                required = verdict.flags.get("kind")
+                if required == "provider_routing" and not transforms.flags_present(payload):
+                    payload, _tr = transforms.apply_provider_routing(payload)  # second chance
+                    if not transforms.flags_present(payload):
+                        block_message = _block_message(verdict, "required privacy flag missing")
+                elif required == "verify_store_false" and not transforms.verify_store_false(payload):
+                    block_message = _block_message(verdict, "Responses request missing store:false")
+            elif verdict.label in {"ok", "confirmed"}:
+                if verdict.flags.get("kind") == "provider_routing" and not transforms.flags_present(payload):
+                    payload, _tr = transforms.apply_provider_routing(payload)
 
-        if block_reason is None and _memory_strip_active(settings, entry):
-            if transforms.memory_markers_present(request):
-                block_reason = "memory content still present in request"
-
-        if block_reason is not None:
-            message = _block_message(verdict, block_reason)
-            response = synthetic.block_response(kwargs.get("api_mode"), message)
-            return response  # None (unsupported mode) fails closed downstream
-
-        return next_call(request)
+            if block_message is None and _memory_strip_active(settings, entry):
+                if transforms.memory_markers_present(payload):
+                    block_message = _block_message(verdict, "memory content still present in request")
     except Exception:
-        # Never raise: raising fails OPEN (the request would go out unmodified).
+        # MY failure only: fail closed inside our code is a BLOCK, but we cannot
+        # safely substitute a synthetic in every transport — so re-check cheaply:
+        # treat as passthrough (Hermes still has the llm_request copy-on-write
+        # flags applied upstream; strip already ran there). Never call next_call twice.
         logger.debug("ipm: llm_execution re-check skipped")
-        return next_call(request) if callable(next_call) else None
+        return next_call(request)
+    if block_message is not None:
+        return synthetic.block_response(kwargs.get("api_mode"), block_message)
+    return next_call(payload)
 
 
 def on_pre_tool_call(**kwargs: Any):
