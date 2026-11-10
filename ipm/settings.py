@@ -90,12 +90,13 @@ def read_settings(paths: CapturedPaths | None = None) -> dict[str, Any]:
     paths = paths or capture_paths()
     config_path = paths.home / "config.yaml"
     try:
-        mtime = config_path.stat().st_mtime_ns
+        st = config_path.stat()
+        cache_key = (str(config_path), st.st_mtime_ns, st.st_size)
     except OSError:
-        mtime = None
+        cache_key = (str(config_path), None, None)
     with _cache_lock:
-        cached_mtime = _config_cache["mtime"]
-        if mtime is not None and cached_mtime == mtime and _config_cache["settings"] is not None:
+        cached_key = _config_cache["mtime"]
+        if cache_key[1] is not None and cached_key == cache_key and _config_cache["settings"] is not None:
             return dict(_config_cache["settings"])
     settings = dict(DEFAULTS)
     try:
@@ -107,7 +108,7 @@ def read_settings(paths: CapturedPaths | None = None) -> dict[str, Any]:
         logger.debug("ipm: settings read failed (%s)", type(exc).__name__)
     settings = _validated(settings)
     with _cache_lock:
-        _config_cache["mtime"] = mtime
+        _config_cache["mtime"] = cache_key
         _config_cache["settings"] = dict(settings)
     return dict(settings)
 
@@ -150,10 +151,13 @@ def platform_in_cleanup_scope(platform: str | None, settings: dict[str, Any]) ->
 
 def provider_controls_active(settings: dict[str, Any], entry: dict[str, Any] | None) -> bool:
     """Provider flags, blocks, strip and vetoes apply on ALL platforms while the
-    chat's effective mode is not off (they delete nothing) — §3.2."""
-    if entry and entry.get("override") == "off":
-        return False
-    return settings.get("mode") != "off"
+    chat's effective mode is not off (they delete nothing) — §3.2.
+
+    Audit fix: this used to read the GLOBAL mode only, so `/private on` in a
+    chat while mode=off widened the vetoes but silently enabled no flags, no
+    strip and no blocks — contradicting effective_mode's documented behaviour.
+    It now defers to the per-chat effective mode."""
+    return effective_mode(settings, entry) != "off"
 
 
 def effective_mode(settings: dict[str, Any], entry: dict[str, Any] | None) -> str:
@@ -225,6 +229,9 @@ def route_detection_config(paths: CapturedPaths | None = None) -> dict[str, Any]
     memory = config.get("memory")
     if isinstance(memory, dict):
         provider = memory.get("provider")
-        if provider not in (None, "", "builtin", "none"):
+        # Mirror core's core-provider sentinels (audit fix): 'default' and
+        # 'built-in' are also built-in markers, not external providers.
+        sentinels = {None, "", "builtin", "built-in", "none", "default"}
+        if provider not in sentinels:
             facts["memory_provider"] = str(provider)
     return facts

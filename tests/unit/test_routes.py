@@ -40,10 +40,14 @@ def test_bigmodel_blocks():
     assert v.label == "block"
 
 
-def test_loopback_local_is_already():
-    v = classify("custom", "http://127.0.0.1:11434/v1", "chat_completions", "llama", "api_key", None)
-    assert v.policy == "ALREADY"
-    assert v.label == "ok"
+def test_loopback_local_is_forwarding_unknown():
+    """Audit fix: a loopback endpoint may be a forwarding proxy
+    (LiteLLM, SSH tunnel, relay) — never report ALREADY/\u2705 for it."""
+    from ipm.routes import classify
+    v = classify("custom", "http://localhost:4000/v1", None, None, None, None, None)
+    assert v.label == "warn"
+    assert any("forwarding unknown" in r for r in v.reasons)
+
 
 
 def test_anthropic_auth_split():

@@ -67,14 +67,44 @@ def apply_for_route(request: dict[str, Any], flags: dict[str, Any]) -> tuple[dic
 
 
 def memory_markers_present(request: dict[str, Any]) -> bool:
-    """True if a recognised memory block or <memory-context> span survived into the
-    final request while ``use_memory=false`` (block condition, §3.7)."""
+    """True if a recognised memory block or a WELL-ORDERED <memory-context> span
+    survived into the final request while ``use_memory=false`` (§3.7).
+
+    Detection is scoped to the LOCATIONS WE STRIP (audit fix): the system prompt
+    (messages[0] role system/developer, codex ``instructions``, anthropic
+    ``system``) and user messages. Tool and assistant transcript content is not
+    an injected memory surface — a rendered header quoted inside a tool result
+    must not permanently block a session (kept content is disclosed).
+    """
     from . import strip as strip_mod
 
-    texts = _collect_texts(request)
-    for text in texts:
-        if strip_mod.has_memory_block(text) or strip_mod.has_memory_context_span(text):
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        for i, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
+            if strip_mod.is_system_message(msg, i):
+                for text in strip_mod.content_texts(msg.get("content")):
+                    if strip_mod.has_memory_block(text):
+                        return True
+            elif strip_mod.is_user_message(msg):
+                for text in strip_mod.content_texts(msg.get("content")):
+                    if strip_mod.has_memory_context_span(text):
+                        return True
+    instructions = request.get("instructions")
+    if isinstance(instructions, str) and strip_mod.has_memory_block(instructions):
+        return True
+    system = request.get("system")
+    for text in strip_mod.anthropic_system_texts(system):
+        if strip_mod.has_memory_block(text):
             return True
+    inp = request.get("input")
+    if isinstance(inp, list):
+        for item in inp:
+            if isinstance(item, dict) and item.get("role") == "user":
+                for text in strip_mod.content_texts(item.get("content")):
+                    if strip_mod.has_memory_context_span(text):
+                        return True
     return False
 
 

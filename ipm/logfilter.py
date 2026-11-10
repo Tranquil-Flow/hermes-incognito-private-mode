@@ -4,11 +4,17 @@ Attached in register() (the earliest public point) to the emitting loggers AND
 their handlers for:
 - ``gateway.run``  — inbound message line (gateway/run_turn.py, ``msg=%r`` arg idx 3, reply idx 5)
 - ``agent.turn_context`` — conversation turn line (msg arg idx 5)
-- ``hermes.tool_calls`` — tool-call lines (its own handler writes logs/tool_calls.log)
+- ``hermes.tool_calls`` — tool-call lines (``<ts>  <tool>: "<preview>"``; the
+  preview carries tool-argument content and is redacted whole)
 
 Redacts msg/args for ALL records of those formats when mode != off (records
 carry no reliable session id). Records written before the plugin loaded cannot
 be redacted (disclosed). Content-free logging on failure (§2.5).
+
+ReDoS safety (post-audit): the rendered-text regexes use UNAMBIGUOUS quoted-
+string alternation (``(?:[^'\\n\\"]|\\.)*`` — no backslash double-consumption),
+and rendered messages are capped at _SCAN_CAP chars. No exponential
+backtracking is possible.
 """
 
 from __future__ import annotations
@@ -19,12 +25,16 @@ from typing import Any, Callable
 
 TARGET_LOGGERS = ("gateway.run", "agent.turn_context", "hermes.tool_calls")
 _MARKER = "_ipm_private_filter"
+_SCAN_CAP = 4096  # rendered chars scanned for redaction; beyond this, pass as-is
 
-# Rendered f-string / %r fallback: msg='...' possibly with escapes; or unquoted
-# f-string text (msg=sentinel) running to whitespace/end.
-_MSG_RENDERED_RE = re.compile(r"(\bmsg=)(['\"])(?:\\.|(?!\2).)*\2")
+# Unambiguous quoted-string forms: quote char is excluded from the bare-char
+# alternation, so a backslash cannot be consumed two ways (no catastrophic
+# backtracking). Each of these is linear in the scanned region.
+_MSG_RENDERED_RE = re.compile(r"\bmsg=(?:'[^'\\\n]*'|\"[^\"\\\n]*\"|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\")")
+_REPLY_TEXT_RE = re.compile(r"\breply_to_text=(?:'[^'\\\n]*'|\"[^\"\\\n]*\"|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\")")
 _MSG_UNQUOTED_RE = re.compile(r"(\bmsg=)([^\s]+(?:\s+(?!\w+=)[^\s=]+)*)")
-_REPLY_TEXT_RE = re.compile(r"(\breply_to_text=)(['\"])(?:\\.|(?!\2).)*\2")
+# hermes.tool_calls lines: '<ts>  <tool_name>: "<preview>"' — redact the preview.
+_TOOL_PREVIEW_RE = re.compile('^(\\S+\\s+\\S+\\s+\\S+:\\s)(["\'])(?:[^"\'\\\\n]|\\\\.)*\\2')
 
 
 class PrivateLogFilter(logging.Filter):
@@ -67,10 +77,16 @@ class PrivateLogFilter(logging.Filter):
             rendered = record.getMessage()
         except Exception:
             return
-        new = _MSG_RENDERED_RE.sub(r"\1\2[redacted]\2", rendered)
-        if new == rendered:
-            new = _MSG_UNQUOTED_RE.sub(r"\1[redacted]", rendered)
-        new = _REPLY_TEXT_RE.sub(r"\1\2[redacted]\2", new)
+        if record.name == "hermes.tool_calls":
+            new = _TOOL_PREVIEW_RE.sub(r"\1[redacted]", rendered)
+        else:
+            scan = rendered[:_SCAN_CAP]
+            new = _MSG_RENDERED_RE.sub(lambda m: m.group(0)[: m.group(0).index("=") + 1] + "[redacted]", scan)
+            if new == scan:
+                new = _MSG_UNQUOTED_RE.sub(r"\1[redacted]", scan)
+            new = _REPLY_TEXT_RE.sub(lambda m: m.group(0)[: m.group(0).index("=") + 1] + "[redacted]", new)
+            if len(rendered) > _SCAN_CAP:
+                new = new + rendered[_SCAN_CAP:]
         if new != rendered:
             record.msg = new
             record.args = None
@@ -90,7 +106,13 @@ _shared_filter: PrivateLogFilter | None = None
 
 
 def attach(mode_active: Callable[[], bool] | None = None) -> int:
-    """Attach the filter to the target loggers and their handlers. Idempotent."""
+    """Attach the filter to the target loggers and their handlers. Idempotent.
+
+    Root handlers are NOT touched (post-audit): the filter would otherwise run
+    on every record in the process. Records reaching the target loggers through
+    propagate/root handlers are covered by the logger-level filter; records on
+    unrelated loggers are none of this filter's business (§3.6 scope).
+    """
     global _shared_filter
     if mode_active is None:
         mode_active = _mode_active_from_settings
@@ -103,7 +125,7 @@ def attach(mode_active: Callable[[], bool] | None = None) -> int:
         if not any(getattr(f, _MARKER, False) for f in lg.filters):
             lg.addFilter(_shared_filter)
             attached += 1
-        for handler in list(lg.handlers) + list(logging.getLogger().handlers):
+        for handler in list(lg.handlers):
             if not any(getattr(f, _MARKER, False) for f in handler.filters):
                 handler.addFilter(_shared_filter)
                 attached += 1
@@ -119,7 +141,7 @@ def detach() -> int:
             if getattr(f, _MARKER, False):
                 lg.removeFilter(f)
                 removed += 1
-        for handler in list(lg.handlers) + list(logging.getLogger().handlers):
+        for handler in list(lg.handlers):
             for f in list(handler.filters):
                 if getattr(f, _MARKER, False):
                     handler.removeFilter(f)

@@ -64,8 +64,13 @@ def host_of(base_url: str | None) -> str:
 
 
 def is_loopback(base_url: str | None) -> bool:
-    host = host_of(base_url)
-    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+    return _loopback_host(host_of(base_url))
+
+
+def _loopback_host(host: str) -> bool:
+    """Bare-host variant (host_of output); urlparse has no scheme for bare
+    names, so a host string must be checked directly."""
+    return (host or "").lower() in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 @dataclass
@@ -110,7 +115,7 @@ def _model_matches(row_models: list[str] | None, model: str | None) -> bool:
 
 
 def _host_known(host: str, rows: list[dict[str, Any]]) -> bool:
-    if not host or is_loopback(host):
+    if not host or _loopback_host(host):
         return True
     for row in rows:
         match = row.get("match") or {}
@@ -129,12 +134,19 @@ def _row_matches(row: dict[str, Any], *, host: str, provider: str | None, auth_h
         if host not in hosts:
             return False
     else:
-        # No curated host: provider-id match only, and only over a host this table
-        # knows (endpoint host is authoritative; §3.7).
+        # No curated host: provider-id match only, over an EMPTY or UNCLAIMED
+        # host (audit fix — a provider id must never re-label a host another
+        # row curates: 'opencode-zen' + api.moonshot.ai used to inherit kimi's
+        # host with a better verdict). If the host is claimed, only the
+        # claiming rows may match; a provider mismatch there means the
+        # candidates set stays empty -> UNKNOWN/warn, never the host's policy.
         if not provider_ids or (provider or "").lower() not in provider_ids:
             return False
-        if not _host_known(host, all_rows if all_rows is not None else [row]):
-            return False
+        if host and not _loopback_host(host):
+            for other in (all_rows if all_rows is not None else [row]):
+                om = other.get("match") or {}
+                if host in {h.lower() for h in (om.get("base_url_hosts") or [])}:
+                    return False  # claimed by a curated row: let it match instead
     if provider_ids and (provider or "").lower() not in provider_ids:
         return False
     if not _auth_matches(match.get("auth", "any"), auth_hint):
@@ -178,12 +190,11 @@ def classify(provider: str | None, base_url: str | None, api_mode: str | None = 
                str(conf.get("policy_rev") or "") == str(table.get("policy_rev")):
                 confirmed_ids.add(str(conf.get("row_id") or cid))
     if confirmed_ids:
-        kept = [r for r in candidates if r.get("id") in confirmed_ids]
-        # The user asserted which row applies for this host+provider; honour it
-        # (attested, not verified) while keeping model-specific rows as candidates.
-        if kept:
-            candidates = kept + [r for r in candidates
-                                 if (r.get("match") or {}).get("models") and r not in kept]
+        # A confirmation upgrades ONLY its ACCOUNT_SETTING/ORG_AGREEMENT row's
+        # label (audit fix — narrowing candidates to the confirmed row dropped
+        # worse co-candidates, e.g. a gemini-paid confirmation would have
+        # hidden gemini-api NONE_TRAINS). Worst policy still wins.
+        pass
     if not candidates:
         reasons = ["unrecognised endpoint (no curated route matches)"]
         return RouteVerdict(label="warn", policy="UNKNOWN", row_ids=[], reasons=reasons,
@@ -219,6 +230,12 @@ def classify(provider: str | None, base_url: str | None, api_mode: str | None = 
             reasons.append(account_setting)
     elif worst == "UNKNOWN":
         reasons.append("no curated route matches this endpoint")
+    if _loopback_host(host) and label in {"ok", "confirmed"}:
+        # Audit fix: a loopback endpoint may be a proxy (LiteLLM, port-forward,
+        # relay) forwarding to ANY remote provider — never report ✅/ALREADY.
+        label = "warn"
+        reasons.append("local endpoint (forwarding unknown): data leaves the machine "
+                       "wherever this proxy forwards — only treat as local if you run it")
     return RouteVerdict(label=label, policy=worst, row_ids=row_ids, flags=flags,
                         account_setting=account_setting, reasons=reasons,
                         policy_rev=str(table.get("policy_rev")), confirmed=confirmed)

@@ -59,7 +59,7 @@ def test_strip_noop_returns_same_object():
                             {"role": "user", "content": "plain"}]}
     new_request, counts = strip.strip_request(request)
     assert new_request is request  # copy-on-write: nothing removed -> nothing copied
-    assert counts == {"blocks": 0, "spans": 0}
+    assert counts == {"blocks": 0, "spans": 0, "ambiguous": 0}
 
 
 def test_strip_does_not_eat_neighbouring_blocks():

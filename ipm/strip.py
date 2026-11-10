@@ -3,10 +3,22 @@
 Removes, from the outgoing request copy only:
 - recognised built-in memory blocks (``tools/memory_tool_store.py`` ``_render_block``
   format: a 46-``═`` rule, the block header, another rule, the entries) from
-  chat_completions ``messages[0]`` system text, codex ``instructions`` and
-  anthropic ``system``;
+  chat_completions ``messages[0]`` system text (role ``system`` OR ``developer``),
+  codex ``instructions`` and anthropic ``system``;
 - ``<memory-context>…</memory-context>`` spans (``agent/memory_context.py``) from
   user messages.
+
+Block-span strategy (fixed after the blank-line-entry audit finding):
+1. PRIMARY — exact reconstruction. The plugin renders the block from the same
+   entries core renders (``'\\n§\\n'.join(entries)`` under a rule/title/rule
+   header) and removes that exact substring. Core builds the prompt from its
+   load-time snapshot of these files, so an unchanged file yields an exact match.
+2. FALLBACK — if reconstruction is unavailable or does not match, strip the
+   header + entries up to the first blank line and raise an ``ambiguous`` flag.
+3. FAIL CLOSED — the caller (enforce) treats ``ambiguous`` as memory-still-present
+   and blocks the request rather than risk sending entry content. Blank lines
+   inside entries are legal in core (``MemoryStore.add`` only ``strip()``s the
+   ends), so a heuristic end boundary alone is NOT trustworthy.
 
 Claim wording: "recognised memory blocks are removed from main-chat requests" —
 NOT "memory is never read".
@@ -18,12 +30,45 @@ import re
 from typing import Any
 
 MEMORY_TITLE_RE = re.compile(
-    r"^(MEMORY \(your personal notes\)|USER PROFILE \(who the user is\)) \[\d+%[^]]*]\s*$")
+    r"^(MEMORY \(your personal notes\)|USER PROFILE \(who the user is\))\s*\[\d+%[^]]*]\s*$")
 RULE_RE = re.compile(r"^\u2550{46}\s*$")
 MEMORY_CONTEXT_OPEN = "<memory-context>"
 MEMORY_CONTEXT_CLOSE = "</memory-context>"
-_MEMORY_CONTEXT_RE = re.compile(re.escape(MEMORY_CONTEXT_OPEN) + r".*?" + re.escape(MEMORY_CONTEXT_CLOSE),
-                                re.DOTALL)
+# Core's own scrubber is tag-tolerant: `<\s*memory-context\s*>`, case-insensitive.
+_MEMORY_TAG_OPEN_RE = re.compile(r"<\s*memory-context\s*>", re.IGNORECASE)
+_MEMORY_TAG_CLOSE_RE = re.compile(r"<\s*/\s*memory-context\s*>", re.IGNORECASE)
+
+_ENTRY_DELIMITER = "\n§\n"
+
+# Bodies of the memory blocks as core would render them, fed by enforce from the
+# captured memory files (mtime-cached there). Each element is the joined entry
+# body ('entry1\n§\nentry2').
+_memory_bodies: list[str] = []
+
+
+def set_memory_bodies(bodies: list[str]) -> None:
+    """Feed candidate block bodies (exact-reconstruction sources)."""
+    global _memory_bodies
+    try:
+        _memory_bodies = [b for b in (bodies or []) if isinstance(b, str) and b]
+    except Exception:
+        _memory_bodies = []
+
+
+def reset_memory_bodies() -> None:
+    global _memory_bodies
+    _memory_bodies = []
+
+
+def _render_candidates(title_line: str) -> list[str]:
+    """Exact block texts to search for, given the concrete header line seen in
+    the prompt. Percent/char formatting is taken from the prompt itself, so we
+    only need the body to match."""
+    rule = "═" * 46
+    out: list[str] = []
+    for body in _memory_bodies:
+        out.append(f"{rule}\n{title_line}\n{rule}\n{body}")
+    return out
 
 
 def has_memory_block(text: str) -> bool:
@@ -36,58 +81,140 @@ def has_memory_block(text: str) -> bool:
     return False
 
 
-def strip_memory_blocks(text: str) -> tuple[str, int]:
-    """Remove whole blocks (rule+header+rule+entries) from *text*; returns (text, count).
+def _remove_span(text: str, start: int, end: int) -> str:
+    """Remove text[start:end] and repair the junction boundary-locally."""
+    before = text[:start]
+    after = text[end:]
+    if not before:
+        return after.lstrip("\n")
+    if not after:
+        return before.rstrip("\n")
+    return before.rstrip("\n") + "\n\n" + after.lstrip("\n")
 
-    Block span: from the rule line above a header to the earliest of (a) the next
-    rule line, (b) the first blank line after the entries begin (canonical
-    store entries contain no blank lines), (c) end of text. Never removes past
-    a following section that carries no marker.
+
+def strip_memory_blocks(text: str) -> tuple[str, int]:
+    """Compat wrapper: returns (text, count) without the ambiguity flag."""
+    out, count, _amb = strip_memory_blocks_checked(text)
+    return out, count
+
+
+def strip_memory_blocks_checked(text: str) -> tuple[str, int, bool]:
+    """Remove whole blocks; returns (text, count, ambiguous).
+
+    ``ambiguous=True`` means a memory header was present and the entries may
+    NOT have been fully removed (blank lines inside entries make a purely
+    textual end boundary untrustworthy). The caller must fail closed.
     """
     if not isinstance(text, str) or not text:
-        return text, 0
+        return text, 0, False
     lines = text.split("\n")
-    starts: list[int] = []
+    starts: list[int] = []  # index of the rule line ABOVE each header
     for i, line in enumerate(lines):
         if i > 0 and MEMORY_TITLE_RE.match(line.strip()) and RULE_RE.match(lines[i - 1].strip()):
             starts.append(i - 1)
     if not starts:
-        return text, 0
-    skip: set[int] = set()
-    for idx, start in enumerate(starts):
-        end = len(lines)
-        # boundary candidates after the entries' second rule (start+2)
-        for j in range(start + 3, len(lines)):
-            stripped = lines[j].strip()
-            if RULE_RE.match(stripped):
-                end = j  # next rule: another block or a decorated section
+        return text, 0, False
+
+    ambiguous = False
+    removed = 0
+    result = text
+    # Process from the last block backwards so indices stay valid.
+    for start in reversed(starts):
+        title_line = lines[start + 1].strip()
+        rule = "═" * 46
+        header_end = result.find(f"{rule}\n{title_line}\n{rule}\n")
+        if header_end == -1:
+            continue
+        body_start = header_end + len(f"{rule}\n{title_line}\n{rule}\n")
+        span_end = -1
+        # PRIMARY: exact reconstruction from the fed bodies.
+        for cand in _render_candidates(title_line):
+            idx = result.find(cand, header_end)
+            if idx == header_end:
+                span_end = header_end + len(cand)
                 break
-            if stripped == "":
-                end = j  # section join (\n\n): entries never contain blank lines canonically
-                break
-        for i in range(start, end):
-            skip.add(i)
-    kept = [line for i, line in enumerate(lines) if i not in skip]
-    out = "\n".join(kept)
-    out = re.sub(r"\n{3,}", "\n\n", out).strip("\n")
-    return out, len(starts)
+        if span_end == -1:
+            # FALLBACK: entries up to the first blank line; flag ambiguity
+            # (core entries MAY contain blank lines).
+            sub_lines = lines  # line indices align with the ORIGINAL text only
+            # recompute in result-space: walk lines of result from body_start
+            rlines = result.split("\n")
+            # find body_start line index
+            pos = 0
+            bi = 0
+            for bi, ln in enumerate(rlines):
+                if pos + len(ln) + 1 > body_start:
+                    break
+                pos += len(ln) + 1
+            end_i = len(rlines)
+            for j in range(bi + 1, len(rlines)):
+                if rlines[j].strip() == "":
+                    end_i = j
+                    break
+                if RULE_RE.match(rlines[j].strip()):
+                    end_i = j
+                    break
+            span_end = len("\n".join(rlines[:end_i])) if end_i else 0
+            if end_i < len(rlines):
+                span_end += 1  # the newline joining end_i-1 and end_i
+            ambiguous = True
+        result = _remove_span(result, header_end, span_end)
+        removed += 1
+    return result, removed, ambiguous
+
+
+def _find_well_ordered_span(text: str, from_pos: int = 0) -> tuple[int, int] | None:
+    """First well-ordered tolerant-tag span at/after from_pos, or None.
+    Linear scan — no backtracking regex (ReDoS-safe)."""
+    o = _MEMORY_TAG_OPEN_RE.search(text, from_pos)
+    if not o:
+        return None
+    c = _MEMORY_TAG_CLOSE_RE.search(text, o.end())
+    if not c:
+        return None  # unpaired open: caller decides (fail closed)
+    return o.start(), c.end()
 
 
 def has_memory_context_span(text: str) -> bool:
-    return isinstance(text, str) and MEMORY_CONTEXT_OPEN in text and MEMORY_CONTEXT_CLOSE in text
+    """True only for a WELL-ORDERED tolerant-tag span (open before close).
+    Unpaired or reversed tags do NOT count as a strippable span; the caller
+    decides fail-closed handling via span_residue()."""
+    if not isinstance(text, str):
+        return False
+    return _find_well_ordered_span(text) is not None
+
+
+def span_residue(text: str) -> bool:
+    """True when a tolerant tag survives with no strippable well-ordered span
+    (unpaired open, reversed order, or a bare close) — i.e. strip cannot fully
+    clean this text."""
+    if not isinstance(text, str):
+        return False
+    o = _MEMORY_TAG_OPEN_RE.search(text)
+    if not o:
+        return bool(_MEMORY_TAG_CLOSE_RE.search(text))
+    c = _MEMORY_TAG_CLOSE_RE.search(text, o.end())
+    if not c:
+        return True  # open without close: cannot strip
+    return False
 
 
 def strip_memory_context_spans(text: str) -> tuple[str, int]:
+    """Remove well-ordered spans (linear scan). Returns (text, count)."""
     if not isinstance(text, str) or not text:
         return text, 0
     count = 0
-    while has_memory_context_span(text):
-        text = _MEMORY_CONTEXT_RE.sub("", text, count=1)
-        count += 1
-        if count > 64:  # paranoia bound
+    pos = 0
+    while True:
+        span = _find_well_ordered_span(text, pos)
+        if span is None:
             break
-    if count:
-        text = re.sub(r"\n{3,}", "\n\n", text)
+        start, end = span
+        text = _remove_span(text, start, end)
+        count += 1
+        pos = max(0, start - 0)  # continue scanning from the junction
+        if count > 256:  # paranoia bound (linear scan makes this unreachable in practice)
+            break
     return text, count
 
 
@@ -124,11 +251,17 @@ def is_user_message(msg: Any) -> bool:
     return isinstance(msg, dict) and msg.get("role") == "user"
 
 
+def is_system_message(msg: Any, index: int) -> bool:
+    """The system prompt occupies messages[0]; GPT-5/Codex transports may swap
+    its role to 'developer' before middleware runs."""
+    return index == 0 and isinstance(msg, dict) and msg.get("role") in ("system", "developer")
+
+
 def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
     """Strip a full request (chat_completions / codex_responses / anthropic_messages
     shapes). Copy-on-write: returns the ORIGINAL object when nothing was removed.
-    Counts: {blocks, spans}."""
-    counts = {"blocks": 0, "spans": 0}
+    Counts: {blocks, spans, ambiguous}."""
+    counts = {"blocks": 0, "spans": 0, "ambiguous": 0}
     new_request = request
     copied = False
 
@@ -139,30 +272,37 @@ def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             copied = True
         return new_request
 
-    # --- chat_completions: system = messages[0] (role system); spans in user messages
+    def strip_system(text: str) -> str:
+        text2, n, amb = strip_memory_blocks_checked(text)
+        counts["blocks"] += n
+        if amb:
+            counts["ambiguous"] += 1
+        return text2
+
+    # --- chat_completions (also anthropic 'messages'): system = messages[0];
+    #     spans in user messages
     messages = request.get("messages")
     if isinstance(messages, list):
         new_messages: list[Any] | None = None
         for i, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 continue
-            is_system = i == 0 and msg.get("role") == "system"
+            is_system = is_system_message(msg, i)
             texts = content_texts(msg.get("content"))
             changed = False
             new_texts: list[Any] = []
             for text in texts:
-                if is_system:
-                    text2, n = strip_memory_blocks(text)
-                    counts["blocks"] += n
-                else:
-                    text2 = text
+                text2 = strip_system(text) if is_system else text
                 if not is_user_message(msg):
                     new_texts.append(text2)
                     if text2 != text:
                         changed = True
                     continue
+                # user message: strip well-ordered spans; fail closed on residue
                 text3, s = strip_memory_context_spans(text2 if isinstance(text2, str) else text)
                 counts["spans"] += s
+                if isinstance(text3, str) and span_residue(text3):
+                    counts["ambiguous"] += 1
                 new_texts.append(text3)
                 if text3 != (text2 if isinstance(text2, str) else text):
                     changed = True
@@ -187,9 +327,8 @@ def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
     # --- codex_responses: instructions + input items
     instructions = request.get("instructions")
     if isinstance(instructions, str):
-        text2, n = strip_memory_blocks(instructions)
-        if n:
-            counts["blocks"] += n
+        text2 = strip_system(instructions)
+        if text2 != instructions:
             ensure_copy()["instructions"] = text2
     inp = request.get("input")
     if isinstance(inp, list):
@@ -203,6 +342,8 @@ def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             for text in texts:
                 text2, s = strip_memory_context_spans(text)
                 counts["spans"] += s
+                if isinstance(text2, str) and span_residue(text2):
+                    counts["ambiguous"] += 1
                 span_texts.append(text2)
                 if text2 != text:
                     changed = True
@@ -225,30 +366,22 @@ def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
         if new_input is not None:
             ensure_copy()["input"] = new_input
 
-    # --- anthropic_messages: system (str or block list) + user message content
+    # --- anthropic_messages: system (str or block list); user spans already
+    # handled by the shared `messages` pass above (single pass, no double-count).
     system = request.get("system")
     if isinstance(system, str):
-        text2, n = strip_memory_blocks(system)
-        if n:
-            counts["blocks"] += n
+        text2 = strip_system(system)
+        if text2 != system:
             ensure_copy()["system"] = text2
     elif isinstance(system, list):
         new_system: list[Any] | None = None
         for i, part in enumerate(system):
             if isinstance(part, dict) and isinstance(part.get("text"), str):
-                text2, n = strip_memory_blocks(part["text"])
-                if n:
-                    counts["blocks"] += n
+                text2 = strip_system(part["text"])
+                if text2 != part["text"]:
                     new_system = list(system) if new_system is None else new_system
                     new_system[i] = {**part, "text": text2}
         if new_system is not None:
             ensure_copy()["system"] = new_system
-    messages = request.get("messages")
-    if isinstance(messages, list):
-        # NOTE: the chat_completions pass above already strips spans from user
-        # messages in BOTH chat_completions and anthropic_messages shapes (both
-        # carry a `messages` list; anthropic only adds `system`). A second pass
-        # here would double-count and clobber the copy.
-        pass
 
     return new_request, counts

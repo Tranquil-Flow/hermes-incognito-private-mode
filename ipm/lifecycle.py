@@ -56,14 +56,20 @@ _ID_TS_RE = re.compile(r"^\d{8}_\d{6}_\d{6}$")
 # --- read-only row helpers ---------------------------------------------------
 
 def _ro_connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    # as_uri() percent-encodes '#', '?' and '%' — a raw f"file:{path}" URI
+    # truncates at the first '#' and can silently query the wrong file.
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def read_row(db_path: Path, session_id: str) -> dict[str, Any] | None:
+# Row-read outcomes: 'present' | 'absent' | 'error'. ABSENCE AND ERROR ARE NOT
+# THE SAME THING (audit fix): an unreadable DB must never be treated as a
+# deleted row, or entries get falsely tombstoned while their data survives.
+def read_row_checked(db_path: Path, session_id: str) -> tuple[str, dict[str, Any] | None]:
     if not (Path(db_path).exists() and re.match(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$", session_id)):
-        return None
+        return "absent", None
     try:
         conn = _ro_connect(db_path)
         try:
@@ -73,8 +79,13 @@ def read_row(db_path: Path, session_id: str) -> dict[str, Any] | None:
         finally:
             conn.close()
     except sqlite3.Error:
-        return None
-    return dict(row) if row else None
+        return "error", None
+    return ("present", dict(row)) if row else ("absent", None)
+
+
+def read_row(db_path: Path, session_id: str) -> dict[str, Any] | None:
+    state, row = read_row_checked(db_path, session_id)
+    return row if state == "present" else None
 
 
 def min_message_ts(db_path: Path, session_id: str) -> float | None:
@@ -118,17 +129,27 @@ def _entry(ledger: dict[str, Any], session_id: str, platform: str | None, genera
 
 
 def observe_session_start(session_id: str | None, platform: str | None, paths: CapturedPaths) -> None:
-    """on_session_start: create a candidate when cleanup could ever apply (§3.3)."""
+    """on_session_start: create a candidate when cleanup could ever apply (§3.3).
+
+    A chat born while the effective mode is off is EXCLUDED forever (audit fix):
+    the consent text promises "chats created while off survive", and a later
+    mode flip must never retro-arm them. A mode change also closes the current
+    arming generation and opens a new one, so generation matching blocks arming
+    for anything straddling the flip.
+    """
     from . import store
 
     if not session_id or not store.validate_session_id(str(session_id)):
         return
     settings = read_settings(paths)
     meta = store.read("meta", paths.data_dir)
+    _maybe_generation_on_mode_change(settings, meta, paths)
+    meta = store.read("meta", paths.data_dir)
     gen = store.current_generation(meta)
     generation = int(gen["n"]) if gen else None
     enrolled = cleanup_enrolled(settings, meta)
     platform = str(platform or "")
+    mode_now = effective_mode(settings, None)
 
     def fn(ledger: dict[str, Any]) -> dict[str, Any]:
         key = store.hash_session_id(str(session_id))
@@ -136,14 +157,19 @@ def observe_session_start(session_id: str | None, platform: str | None, paths: C
         if existing is not None:
             return ledger
         if not enrolled or not platform_in_cleanup_scope(platform, settings) \
-                or settings.get("keep_history") or generation is None:
+                or settings.get("keep_history") or generation is None \
+                or mode_now != "private":
+            if mode_now != "private":
+                reason = "mode off at creation (survives forever)"
+            elif not enrolled:
+                reason = "cleanup not enrolled"
+            elif not platform_in_cleanup_scope(platform, settings):
+                reason = "platform out of cleanup scope"
+            else:
+                reason = "keep_history=true at creation"
             ledger[key] = {
                 "state": "excluded",
-                "excluded_reason": (
-                    "cleanup not enrolled" if not enrolled
-                    else "platform out of cleanup scope" if not platform_in_cleanup_scope(platform, settings)
-                    else "keep_history=true at creation"
-                ),
+                "excluded_reason": reason,
                 "platform": platform,
                 "first_seen": time.time(),
             }
@@ -153,6 +179,38 @@ def observe_session_start(session_id: str | None, platform: str | None, paths: C
 
     store.mutate("ledger", paths.data_dir, fn)
     maybe_sweep(paths, trigger="session_start")
+
+
+def _maybe_generation_on_mode_change(settings: dict[str, Any], meta: dict[str, Any],
+                                     paths: CapturedPaths) -> None:
+    """When the effective mode differs from the last generation's mode, close
+    that generation and open a new one (armed iff mode == private). Cheap
+    check on a lock-free meta read; the append itself is a locked RMW.
+    Generations recorded before this field existed infer their mode from armed."""
+    from . import store
+
+    try:
+        gen = store.current_generation(meta)
+        if gen is None:
+            return
+        gen_mode = gen.get("mode")
+        if gen_mode is None:
+            gen_mode = "private" if gen.get("armed") else "off"
+        mode_now = effective_mode(settings, None)
+        if gen_mode == mode_now:
+            return
+
+        def apply(m: dict[str, Any]) -> dict[str, Any]:
+            m2 = store.new_generation(m, armed=(mode_now == "private"),
+                                      reason=f"mode -> {mode_now}", now=time.time())
+            new_gen = store.current_generation(m2)
+            if isinstance(new_gen, dict):
+                new_gen["mode"] = mode_now
+            return m2
+
+        store.mutate("meta", paths.data_dir, apply)
+    except Exception:
+        logger.debug("ipm: mode-change generation skipped")
 
 
 def observe_subagent_start(parent_session_id: str | None, child_session_id: str | None,
@@ -204,7 +262,12 @@ def observe_subagent_start(parent_session_id: str | None, child_session_id: str 
 
 def observe_post_compaction(session_id: str | None, old_session_id: str | None,
                             paths: CapturedPaths) -> None:
-    """post_compaction: link the continuation to its predecessor (§3.1/§3.3)."""
+    """post_compaction: link the continuation to its predecessor (§3.1/§3.3).
+
+    Audit fixes: (1) an OLD id we never ledgered is unknown provenance — the
+    continuation is tombstoned excluded instead of silently joining the current
+    generation; (2) keep/off exclusions INHERIT down the lineage, so a kept
+    predecessor can never have a deletable continuation."""
     from . import store
 
     if not session_id or not old_session_id:
@@ -217,8 +280,18 @@ def observe_post_compaction(session_id: str | None, old_session_id: str | None,
     def fn(ledger: dict[str, Any]) -> dict[str, Any]:
         old = ledger.get(old_hash)
         if old is None:
+            # Unknown provenance: protect the continuation permanently.
+            entry = ledger.get(new_hash)
+            if entry is None or entry.get("state") in {"candidate", "armed"}:
+                ledger[new_hash] = {
+                    "state": "excluded",
+                    "excluded_reason": "predecessor provenance unknown (pre-consent chat)",
+                    "parent_hash": old_hash,
+                    "first_seen": time.time(),
+                }
             return ledger
         entry = ledger.get(new_hash)
+        protected = old.get("state") == "excluded" or old.get("override") in {"keep", "off"}
         if entry is None:
             entry = dict(old)
             entry.update({"parent_hash": old_hash, "created_ts": time.time(),
@@ -228,6 +301,14 @@ def observe_post_compaction(session_id: str | None, old_session_id: str | None,
             ledger[new_hash] = entry
         else:
             entry["parent_hash"] = old_hash
+        if protected and entry.get("state") != "deleted":
+            entry["state"] = "excluded"
+            entry["excluded_reason"] = (
+                "lineage /private keep" if old.get("override") == "keep"
+                else "lineage /private off" if old.get("override") == "off"
+                else "predecessor excluded")
+            if old.get("override") in {"keep", "off"}:
+                entry["override"] = old["override"]
         old.setdefault("children", [])
         if new_hash not in old["children"]:
             old["children"].append(new_hash)
@@ -272,29 +353,33 @@ def set_override(session_id: str, override: str, paths: CapturedPaths) -> bool:
 
 
 def on_external_delete(session_id: str, reason: str, paths: CapturedPaths) -> None:
-    """on_session_delete: invalidation hint ONLY (§4) — fires for archive too.
-    Verify row state before marking (exact-id absence = externally removed)."""
+    """on_session_delete: invalidation hint ONLY (§4) — fires for archive too,
+    and ALSO for our own fenced delete (core fires the hook inside
+    delete_session). Verify row state before marking (exact-id absence =
+    externally removed). Marks ONLY the single key — never a lineage (audit
+    fix: core orphans compression parents instead of deleting them, so a
+    surviving parent must never be recorded as deleted)."""
     from . import store
 
     if not session_id or not store.validate_session_id(str(session_id)):
         return
     key = store.hash_session_id(str(session_id))
-    row = read_row(paths.db_path, str(session_id))
+    state, _row = read_row_checked(paths.db_path, str(session_id))
 
     def fn(ledger: dict[str, Any]) -> dict[str, Any]:
         entry = ledger.get(key)
         if entry is None:
             return ledger
-        if row is None:
-            # Row really gone (delete/prune/repair or our own fenced delete).
+        if entry.get("deleting"):
+            return ledger  # our own fenced delete is in flight — it marks 'fenced'
+        if state == "absent":
             if entry.get("state") in {"armed", "candidate"}:
                 entry["state"] = "deleted"
                 entry["deleted_how"] = "external"
-                for h in store.lineage_hashes(ledger, key):
-                    member = ledger.get(h)
-                    if member is not None and member.get("state") in {"armed", "candidate"}:
-                        member["state"] = "deleted"
-                        member["deleted_how"] = "external"
+                entry["deleted_at"] = time.time()
+                entry.pop("raw_id", None)  # deleted tombstones keep no raw ids
+        elif state == "error":
+            pass  # unreadable DB proves nothing — leave the ledger unchanged
         elif reason == "archive" and entry.get("state") in {"armed", "candidate"}:
             entry["state"] = "excluded"
             entry["excluded_reason"] = "archived by user"
@@ -306,9 +391,13 @@ def on_external_delete(session_id: str, reason: str, paths: CapturedPaths) -> No
 # --- validation / arming -----------------------------------------------------
 
 def _validate_for_arming(row: dict[str, Any], entry: dict[str, Any], gen: dict[str, Any] | None,
-                         db_path: Path) -> tuple[bool, str]:
+                         db_path: Path, ledger: dict[str, Any] | None = None) -> tuple[bool, str]:
     """candidate -> armed checks (§3.3): row exists, whole life inside one armed
-    generation, no message older than the generation start."""
+    generation, no message older than the generation start, and EVERY lineage
+    parent is an admitted ledger member (audit fix: a continuation of an
+    unledgered pre-consent chat must never arm)."""
+    from .store import hash_session_id
+
     if gen is None:
         return False, "no arming generation"
     if not gen.get("armed"):
@@ -326,6 +415,14 @@ def _validate_for_arming(row: dict[str, Any], entry: dict[str, Any], gen: dict[s
         return False, "messages predate the arming generation"
     if entry.get("override") in {"off", "keep"}:
         return False, "user kept this chat"
+    parent_id = row.get("parent_session_id")
+    if parent_id and ledger is not None:
+        parent = ledger.get(hash_session_id(str(parent_id)))
+        if parent is None or parent.get("state") == "excluded":
+            return False, "parent provenance unadmitted"
+        pgen = parent.get("generation")
+        if pgen is not None and pgen != entry.get("generation"):
+            return False, "parent from another generation"
     return True, ""
 
 
@@ -376,19 +473,43 @@ def run_sweep(paths: CapturedPaths, batch_limit: int = MAX_BATCH) -> dict[str, i
         ledger = store.read("ledger", paths.data_dir)
         candidates: list[str] = []
         changed_entries: dict[str, dict[str, Any]] = {}
+        # Residue recovery: a previous sweep may have died between the fenced
+        # delete and its marking. Entries flagged 'deleting' whose row is now
+        # absent get their session FILES removed here (audit fix — files were
+        # previously only cleaned on the happy path), then tombstoned.
+        for key, entry in ledger.items():
+            if not isinstance(entry, dict) or not entry.get("deleting"):
+                continue
+            raw_id = entry.get("raw_id")
+            state, _row = read_row_checked(paths.db_path, str(raw_id or ""))
+            if state == "absent":
+                if raw_id:
+                    cleanup_session_files(paths, [str(raw_id)])
+                entry["state"] = "deleted"
+                entry["deleted_how"] = "fenced"
+                entry["deleted_at"] = time.time()
+                entry.pop("deleting", None)
+                entry.pop("raw_id", None)
+                changed_entries[key] = entry
+            elif state == "error":
+                pass  # unreadable DB: retry on a later sweep, change nothing
+            else:
+                entry.pop("deleting", None)  # row is back?! keep the data, drop the intent
+                changed_entries[key] = entry
         for key, entry in ledger.items():
             if not isinstance(entry, dict):
                 continue
             state = entry.get("state")
             if state == "candidate" and gen is not None and enrolled:
-                ok, why = _validate_for_arming_from_ledger(entry, gen, paths)
+                ok, why = _validate_for_arming_from_ledger(entry, gen, paths, ledger)
                 if ok:
                     entry["state"] = "armed"
                     counts["armed"] += 1
                     changed_entries[key] = entry
                 else:
                     if why in {"row predates the arming generation", "messages predate the arming generation",
-                               "user kept this chat"}:
+                               "user kept this chat", "parent provenance unadmitted",
+                               "parent from another generation"}:
                         entry["state"] = "excluded"
                         entry["excluded_reason"] = why
                         counts["dropped"] += 1
@@ -405,14 +526,17 @@ def run_sweep(paths: CapturedPaths, batch_limit: int = MAX_BATCH) -> dict[str, i
             def apply(l: dict[str, Any]) -> dict[str, Any]:
                 for k, v in changed_entries.items():
                     current = l.get(k)
-                    if isinstance(current, dict) and current.get("state") == "candidate":
+                    if isinstance(current, dict) and (current.get("state") == "candidate"
+                                                      or current.get("deleting")):
                         l[k] = v
                 return l
             store.mutate("ledger", paths.data_dir, apply)
             # Entries armed in THIS pass are deletable in the same sweep.
             candidates.extend(k for k, v in changed_entries.items() if v.get("state") == "armed")
 
-        for key in candidates[:batch_limit]:
+        batch = candidates[:batch_limit]
+        counts["attempted"] = len(batch)
+        for key in batch:
             entry = ledger.get(key) or {}
             outcome = _delete_if_ready(key, entry, ledger, settings, meta, paths, enrolled)
             counts[outcome] = counts.get(outcome, 0) + 1
@@ -422,21 +546,24 @@ def run_sweep(paths: CapturedPaths, batch_limit: int = MAX_BATCH) -> dict[str, i
     return counts
 
 
-def _validate_for_arming_from_ledger(entry: dict[str, Any], gen: dict[str, Any], paths: CapturedPaths) -> tuple[bool, str]:
+def _validate_for_arming_from_ledger(entry: dict[str, Any], gen: dict[str, Any], paths: CapturedPaths,
+                                     ledger: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Sweep-time validation for a candidate whose raw id we must recover.
 
     The ledger is keyed by hash; to read the row we need the raw id, so candidates
     store a ``raw_id`` field (ids are identifiers, not content — §2.5 allows
     provider/session ids as verdict metadata; we store the id only inside the
-    plugin's own data dir, 0600).
+    plugin's own data dir, 0600, and drop it once the entry is deleted).
     """
     raw_id = entry.get("raw_id")
     if not raw_id:
         return False, "missing timestamps"  # no row to validate -> drop
-    row = read_row(paths.db_path, str(raw_id))
-    if row is None:
+    state, row = read_row_checked(paths.db_path, str(raw_id))
+    if state == "error":
+        return False, "db unreadable"  # never treated as a deletion
+    if state == "absent" or row is None:
         return False, "row missing"
-    return _validate_for_arming(row, entry, gen, paths.db_path)
+    return _validate_for_arming(row, entry, gen, paths.db_path, ledger)
 
 
 def _delete_if_ready(key: str, entry: dict[str, Any], ledger: dict[str, Any],
@@ -447,9 +574,13 @@ def _delete_if_ready(key: str, entry: dict[str, Any], ledger: dict[str, Any],
     raw_id = entry.get("raw_id")
     if not raw_id:
         return "refused"
-    row = read_row(paths.db_path, str(raw_id))
-    if row is None:
-        # Someone else removed it: verify + mark deleted (external).
+    state, row = read_row_checked(paths.db_path, str(raw_id))
+    if state == "error":
+        # Unreadable DB proves nothing: refuse and leave the ledger unchanged
+        # (audit fix — 'absent' and 'error' were conflated before).
+        return "refused"
+    if state == "absent" or row is None:
+        # Someone else removed it: verify + mark deleted (external), this key only.
         store.mutate("ledger", paths.data_dir, lambda l: _mark_external_deleted(l, key))
         return "deleted"
     if not row_is_closed(row):
@@ -458,27 +589,17 @@ def _delete_if_ready(key: str, entry: dict[str, Any], ledger: dict[str, Any],
         return "unenrolled"
     if effective_mode(settings, entry) == "off":
         return "mode_off"
-    # Re-check under the store lock immediately before mutating (§3.3/§4).
-    state_ok = {"ok": False}
-
-    def check(l: dict[str, Any]) -> None:
-        e = l.get(key)
-        state_ok["ok"] = bool(e and e.get("state") == "armed" and e.get("override") not in {"off", "keep"})
-
-    store.mutate("ledger", paths.data_dir, check)
-    if not state_ok["ok"]:
-        return "refused"
     return fenced_delete(str(raw_id), key, ledger, paths)
 
 
 def _mark_external_deleted(ledger: dict[str, Any], key: str) -> dict[str, Any]:
     entry = ledger.get(key)
-    if entry is not None and entry.get("state") in {"armed", "candidate"}:
-        for h in store_lineage(ledger, key):
-            member = ledger.get(h)
-            if member is not None and member.get("state") in {"armed", "candidate"}:
-                member["state"] = "deleted"
-                member["deleted_how"] = "external"
+    if entry is not None and entry.get("state") in {"armed", "candidate"} \
+            and not entry.get("deleting"):
+        entry["state"] = "deleted"
+        entry["deleted_how"] = "external"
+        entry["deleted_at"] = time.time()
+        entry.pop("raw_id", None)
     return ledger
 
 
@@ -489,38 +610,78 @@ def store_lineage(ledger: dict[str, Any], key: str) -> set:
 
 
 def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any], paths: CapturedPaths) -> str:
-    """The only deletion path (§3.1/§3.3). Returns 'deleted' | 'refused' | 'busy'."""
+    """The only deletion path (§3.1/§3.3). Returns 'deleted' | 'refused' | 'busy'.
+
+    Audit-fix structure:
+    1. Under the LEDGER lock (store.mutate RMW): re-read the FRESH ledger and
+       validate the root AND every fence target (state armed, no keep/off
+       override, row closed). A /private keep|off landing mid-sweep is now seen
+       here. Set a 'deleting' intent flag on every target — core fires our
+       on_session_delete hook from INSIDE delete_session, and without this flag
+       our own fence was recorded as 'external' (which also made the deletion
+       notice unreachable).
+    2. Outside the ledger lock: the fenced destructive call.
+    3. Verify exact-id absence; mark ONLY the confirmed-removed target ids
+       (never lineage propagation — compression roots survive in core and must
+       stay armed/excluded, never 'deleted')."""
     from . import store
     from hermes_state import SessionDB
 
-    try:
-        db = SessionDB(paths.db_path)
-    except Exception:
-        return "refused"
-    try:
-        targets = db.get_session_delete_targets(raw_id)
-    finally:
+    # 1. locked validation + deleting intent
+    decision: dict[str, Any] = {"ok": False, "targets": None}
+
+    def check(l: dict[str, Any]) -> dict[str, Any]:
+        e = l.get(key)
+        if not (e and e.get("state") == "armed" and e.get("override") not in {"off", "keep"}):
+            return l
         try:
-            db.close()
+            db = SessionDB(paths.db_path)
         except Exception:
-            pass
-    if not targets:
+            return l
+        try:
+            targets = db.get_session_delete_targets(raw_id)
+        except Exception:
+            return l
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        if not targets:
+            return l
+        for target in targets:
+            th = store.hash_session_id(target)
+            te = l.get(th)
+            if te is None or te.get("state") != "armed" or te.get("override") in {"off", "keep"}:
+                logger.debug("ipm: delete refused (unadmitted target)")
+                return l
+            t_state, t_row = read_row_checked(paths.db_path, target)
+            if t_state == "error":
+                logger.debug("ipm: delete refused (db unreadable)")
+                return l
+            if t_state == "present" and t_row is not None and not row_is_closed(t_row):
+                logger.debug("ipm: delete refused (open lineage member)")
+                return l
+        decision["ok"] = True
+        decision["targets"] = list(targets)
+        for target in targets:
+            th = store.hash_session_id(target)
+            member = l.get(th)
+            if isinstance(member, dict):
+                member["deleting"] = True
+        return l  # mutate persists the dict it returns — flags must survive
+
+    store.mutate("ledger", paths.data_dir, check)
+    targets = decision["targets"]
+    if not decision["ok"] or not targets:
         return "refused"
-    # Every target must be ledgered armed+closed; else refuse the WHOLE operation.
-    for target in targets:
-        t_entry = ledger.get(store.hash_session_id(target))
-        if t_entry is None or t_entry.get("state") not in {"armed"} or t_entry.get("override") in {"off", "keep"}:
-            logger.debug("ipm: delete refused (unadmitted target)")
-            return "refused"
-        t_row = read_row(paths.db_path, target)
-        if t_row is not None and not row_is_closed(t_row):
-            logger.debug("ipm: delete refused (open lineage member)")
-            return "refused"
-    # Release the store lock for the destructive call (its on_session_delete
-    # callback takes the ledger lock); the fence re-checks inside the transaction.
+
+    # 2. the destructive call (its on_session_delete callback is neutralised by
+    #    the deleting flags set above)
     try:
         db = SessionDB(paths.db_path)
     except Exception:
+        self_clear(paths, [store.hash_session_id(t) for t in targets])
         return "refused"
     try:
         deleted = db.delete_session(
@@ -533,6 +694,7 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any], paths: Captured
             db.close()
         except Exception:
             pass
+        self_clear(paths, [store.hash_session_id(t) for t in targets])
         logger.debug("ipm: fenced delete raised (guard/refusal)")
         return "refused"
     finally:
@@ -540,25 +702,46 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any], paths: Captured
             db.close()
         except Exception:
             pass
-    # Verify exact-id absence before marking (§3.3).
-    if not deleted or read_row(paths.db_path, raw_id) is not None:
+    # 3. Verify exact-id absence before marking (§3.3).
+    state, _row = read_row_checked(paths.db_path, raw_id)
+    if not deleted or state != "absent":
+        self_clear(paths, [store.hash_session_id(t) for t in targets])
         return "refused"
     cleanup_session_files(paths, targets)
 
     def mark(l: dict[str, Any]) -> dict[str, Any]:
         for t in targets:
             h = store.hash_session_id(t)
-            for k in store.lineage_hashes(l, h) | {h}:
-                member = l.get(k)
-                if member is not None and member.get("state") in {"armed", "candidate"}:
-                    member["state"] = "deleted"
-                    member["deleted_at"] = time.time()
-                    member["deleted_how"] = "fenced"
+            member = l.get(h)
+            if isinstance(member, dict) and member.get("deleting"):
+                member["state"] = "deleted"
+                member["deleted_at"] = time.time()
+                member["deleted_how"] = "fenced"
+                member.pop("deleting", None)
+                member.pop("raw_id", None)  # deleted tombstones keep no raw ids
         return l
 
     store.mutate("ledger", paths.data_dir, mark)
     flush_wal(paths.db_path)
     return "deleted"
+
+
+def self_clear(paths: CapturedPaths, hashes: list[str]) -> None:
+    """Drop the 'deleting' intent flags (validation or delete failed; the data
+    stays, so the intent must not linger)."""
+    from . import store
+
+    def clear(l: dict[str, Any]) -> dict[str, Any]:
+        for h in hashes:
+            member = l.get(h)
+            if isinstance(member, dict):
+                member.pop("deleting", None)
+        return l
+
+    try:
+        store.mutate("ledger", paths.data_dir, clear)
+    except Exception:
+        logger.debug("ipm: deleting-flag clear failed")
 
 
 # --- files + WAL -------------------------------------------------------------
@@ -719,7 +902,7 @@ def deep_clean_report(paths: CapturedPaths) -> str:
         "  2. hermes sessions optimize          # never --force",
         "  3. restart Hermes",
         "",
-        "`hermes incognito-private-mode deep-clean` runs the same optimize without",
-        "--force after a free-disk check and judges success from output + DB size.",
+        "`hermes incognito-private-mode deep-clean` PRINTS this report only — it",
+        "does not run the optimize itself (that needs Hermes stopped, see above).",
     ]
     return "\n".join(lines)

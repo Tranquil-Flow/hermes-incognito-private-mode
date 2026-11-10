@@ -59,8 +59,13 @@ deep clean, auxiliary calls without our flags, max-iterations summary call, ...
 
 - **Fail closed on deletes, fail open on requests.** Deletion only proceeds
   for entries the ledger can fully prove (armed lineage + closed with an
-  explicit user end-reason, all targets armed). Any unprovable target refuses
-  the whole operation. Request middlewares never raise into your turn.
+  explicit user end-reason, all targets armed, fresh-ledger re-check under
+  the lock). Any unprovable or unreadable target refuses the whole
+  operation. Request middlewares never raise into your turn; an internal
+  check failure BLOCKS via the synthetic shape where the transport allows it.
+- **Exact-span memory strip.** Memory blocks are removed by reconstructing
+  the exact text core renders (multi-paragraph entries included); when exact
+  reconstruction is impossible the request is blocked instead of sent.
 - **Hermes' own fence is the only delete path.** `SessionDB.delete_session(
   sessions_dir=None, expected_delete_ids=…, exclude_active_write_guards=True)`.
   Never the CLI delete, never `--force`, never compression-chain deletion.
@@ -69,7 +74,6 @@ deep clean, auxiliary calls without our flags, max-iterations summary call, ...
   automatic reason (`ws_disconnect`, idle timeout, …), are never deleted.
 - **Pre-setup chats survive forever.** Cleanup applies only to sessions born
   after you recorded consent ("arming generation"), and only after a
-  24-hour generation span — so a mistaken setup can never eat old history.
 - **Settings/consent never leak to the model.** The ledger, confirmations and
   consent live plugin-side (0600, flock-serialized); prompts only ever see
   hashed ids and verdict labels/counts.
@@ -105,4 +109,4 @@ python -m pytest tests/           # 80 unit+contract tests
 hermes plugins validate <dir>     # catalog validation
 ```
 
-License: MIT.
+License: AGPL-3.0.

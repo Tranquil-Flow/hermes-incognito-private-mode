@@ -31,9 +31,34 @@ Legend: ✅ e2e-verified · 🧪 unit/contract-verified · ⏸️ blocked (reaso
 | 19 | Log redaction | ✅ non-vacuous | Sentinel message flowed (assistant reply returned; db row existed pre-sweep) yet **0 occurrences** across agent.log, gateway.log, tool_calls.log; `[redacted]` visible on the inbound/turn lines in agent.log. |
 | 20 | Crash mid-session | ✅ | Gateway `kill -9` with a turn in flight → row stays **open with `<null>` end_reason**, survives the next sweep; no invented close. |
 | 21 | Status coverage | ✅ | `hermes incognito-private-mode status` renders mode, 3 coverage lines (⛔/⚠️/machine), consent state, arming generation, session counts, last sweep, deep-clean reminder, "What stays", command list. |
-| 22 | Live GLM pass-through + labels | ⏸️ blocked | Harness Z.ai OAuth expired (401 token expired; obtained 2026-11-09 20:19 UTC, 1 h expiry). All harness provider tokens are OAuth with ≤1 h TTL; no static keys exist in the harness env. Owner re-login required; flags/labels themselves verified at dispatch level (see row 23 evidence) and row 4 proved live route classification + block. |
-| 23 | Live Nous + provider.zdr on wire | ⏸️ blocked (same token expiry) | Flags-on-wire proven non-vacuously at dispatch level: `invoke_middleware("llm_request", provider=nous…)` → `extra_body.provider.data_collection=deny, zdr=True` on the returned request; openrouter-classified requests through the live gateway carried the same flags (row 5 protected captures include flagged requests to the custom endpoint). |
-| 24 | P1 transform routes | 📋 documented | route-table rows exist (`p1_transform` kind) but transforms are not implemented in P0; classification never blesses them (label `warn` ceiling) — unit-tested (`test_p1_routes_not_blessed`). |
+| 22 | Live GLM pass-through + labels | ✅ LIVE 2026-11-10 | Owner login round: zai credential accepted; `chat -q` "Reply with exactly one word: pong" → exit 0, model replied; status line 1 = "⚠️ unverified retention; allowed with a warning". Note: the harness zai key intermittently 401s (stale credential) — pass-through + labels verified when the pool serves the valid one. |
+| 23 | Live Nous + zdr flags on wire | ✅ LIVE 2026-11-10 | nous pass-through (`z-ai/glm-5.3-flash` via inference-api.nousresearch.com) completed. The provider explicitly evaluates the request's data-use policy — a model without a no-training endpoint returns 403 "no endpoint … meets this request's data-use requirement (no_training, zero_retention)" — proving the privacy policy reaches and is enforced provider-side; the plugin's error translation rendered it in plain English. Memory veto observed LIVE with a working model: tool call attempted → vetoed → model reported honestly; MEMORY.md md5 unchanged, canary absent. |
+| 24 | P1 transform routes | 📋 documented | route-table rows exist (`p1_unimplemented` kind) but transforms are not implemented in P0; classification never blesses them (label `warn` ceiling) — unit-tested. |
+
+## Audit round addendum (Opus review, 2026-11-10 19:08 UTC)
+
+Three independent Opus reviews (privacy/correctness, security/vuln, independent
+re-verification) ran against the build. Verdicts: critical-issues / needs-fixes /
+mostly-verified. All HIGH findings were fixed the same evening and pinned by new
+regression tests (`tests/unit/test_audit_fixes.py`); the suite is now **96
+passed**. Key fixes: blank-line memory-entry leak (exact-reconstruction strip +
+fail-closed ambiguity), mode-off chats excluded forever, compaction lineage
+marked only for confirmed-removed targets (+`deleting` intent so the fence is
+no longer mislabeled "external"), unledgered-predecessor protection, logfilter
+ReDoS (unambiguous regex + 4 KB cap + tool_calls preview redaction), fail-closed
+llm_execution, provider-id spoofing, loopback forwarding-unknown label, absent
+vs error row reads, URI percent-encoding, `/private on` override, raw-id
+dropping, sweep-attempted accounting.
+
+Honest notes the audit raised that are NOT silently dropped:
+- COVERAGE row numbers differed from BUILD_SPEC §6 (rows 12/14/18/24 were
+  mislabeled or untested). The underlying failures (compaction lineage,
+  mode-off generations) are FIXED and regression-tested; the interactive rows
+  (8/10/15) remain unit/source-pinned, not pty-e2e. tui/desktop remain in the
+  default cleanup scope pending a row-10 e2e — review before shipping.
+- Ledger `deleted_how` was always "external" before the fix (our own fence
+  fired on_session_delete); now "fenced" during intent-guarded deletes.
+- `last_sweep.attempted` under-reported (always 0); fixed.
 
 ## Checkpoint-1 metric (rows 1–3, 6, 7–9, 13, 16, 17)
 

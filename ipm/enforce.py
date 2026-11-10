@@ -3,16 +3,17 @@
 llm_request: apply provider privacy flags (copy-on-write) + memory strip on the
 outgoing copy; lazily observe unknown sessions (policy only -> excluded).
 llm_execution: re-classify the FINAL request; re-apply flags as a second
-chance; otherwise return a typed synthetic block (never raise — raising fails
-open). Never call next_call when blocked.
+chance; otherwise return a typed synthetic block (never raise — an internal
+failure BLOCKS via the synthetic shape, or passes through only when no
+synthetic shape exists for that api_mode). Never call next_call when blocked.
+next_call is invoked exactly once, outside the guarded section: a downstream
+provider error propagates as-is (never re-run the call, never swallow).
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import time
-from pathlib import Path
 from typing import Any
 
 from . import routes as routes_mod
@@ -37,11 +38,42 @@ _BLOCK_TEMPLATE = (
     "Switch model or use /private off for this chat."
 )
 
+_memory_bodies_cache: dict[str, Any] = {"sig": None, "bodies": []}
+
 
 def _confirmations(data_dir) -> dict[str, Any]:
     from . import store
 
     return store.read("confirmations", data_dir)
+
+
+def _memory_bodies(paths) -> list[str]:
+    """Entry bodies of MEMORY.md / USER.md as core renders them (exact
+    strip-reconstruction sources). Cached on (path, size, mtime_ns)."""
+    sig = []
+    texts = []
+    for attr in ("memory_path", "user_profile_path"):
+        p = getattr(paths, attr, None)
+        if p is None:
+            continue
+        try:
+            st = p.stat()
+            sig.append((str(p), st.st_size, st.st_mtime_ns))
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            sig.append((str(p), None, None))
+    key = tuple(sig)
+    if _memory_bodies_cache["sig"] == key:
+        return _memory_bodies_cache["bodies"]
+    bodies: list[str] = []
+    for text in texts:
+        entries = [e.strip() for e in text.split("\n§\n")]
+        entries = [e for e in entries if e]
+        if entries:
+            bodies.append("\n§\n".join(entries))
+    _memory_bodies_cache["sig"] = key
+    _memory_bodies_cache["bodies"] = bodies
+    return bodies
 
 
 def _session_state(session_id: str | None, data_dir) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -97,12 +129,8 @@ def _classify(request: dict[str, Any], kwargs: dict[str, Any], settings: dict[st
     api_mode = kwargs.get("api_mode")
     model = kwargs.get("model")
     auth_hint = _anthropic_auth_hint(request, api_mode)
-    flags = {"provider_routing", "verify_store_false"}
-    implemented = None  # decide inside classify from the row's flags kind
     verdict = routes_mod.classify(provider, base_url, api_mode, model, auth_hint,
-                                  confirmations, implemented)
-    # PER_REQUEST rows whose transform we implement are only ✅ when the flag is
-    # actually present on THIS request (observed); enforcement handles the rest.
+                                  confirmations, None)
     return verdict
 
 
@@ -119,15 +147,6 @@ def _memory_strip_active(settings: dict[str, Any], entry: dict[str, Any] | None)
 
 def on_llm_request(**kwargs: Any):
     """``llm_request`` middleware. Returns {"request": new} or None."""
-    dbg = os.environ.get("IPM_DEBUG")
-    if dbg:
-        try:
-            _p = capture_paths()
-            Path(_p.data_dir).mkdir(parents=True, exist_ok=True)
-            (Path(_p.data_dir) / "trace.txt").open("a").write(
-                f"llm_request enter sid={bool(kwargs.get('session_id'))} req={isinstance(kwargs.get('request'), dict)}\n")
-        except Exception:
-            pass
     try:
         request = kwargs.get("request")
         if not isinstance(request, dict):
@@ -135,12 +154,6 @@ def on_llm_request(**kwargs: Any):
         paths = capture_paths()
         settings = read_settings(paths)
         ledger, entry = _session_state(kwargs.get("session_id"), paths.data_dir)
-        if dbg:
-            try:
-                (Path(paths.data_dir) / "trace.txt").open("a").write(
-                    f"  mode={settings.get('mode')} entry={bool(entry)} active={provider_controls_active(settings, entry)}\n")
-            except Exception:
-                pass
         if not provider_controls_active(settings, entry):
             return None
         # Lazy observation for sessions we never saw start: tombstone only (§3.3).
@@ -161,9 +174,13 @@ def on_llm_request(**kwargs: Any):
             if tr["overridden"]:
                 trace["reason"] = "; ".join(tr["overridden"])
 
-        # 2. Memory strip (§3.5) — wire-level only.
+        # 2. Memory strip (§3.5) — wire-level only. Exact-reconstruction sources
+        # are fed from the captured memory files so multi-paragraph entries are
+        # removed whole (blank lines inside entries are legal in core).
         if _memory_strip_active(settings, entry):
+            strip_mod.set_memory_bodies(_memory_bodies(paths))
             new_request, counts = strip_mod.strip_request(new_request)
+            strip_mod.reset_memory_bodies()
             if counts["blocks"] or counts["spans"]:
                 trace["applied"].append(
                     f"stripped memory blocks={counts['blocks']} spans={counts['spans']}")
@@ -173,13 +190,6 @@ def on_llm_request(**kwargs: Any):
                     "reason": trace.get("reason") or "private mode flags/strip"}
         return None
     except Exception as exc:
-        if os.environ.get("IPM_DEBUG"):
-            try:
-                dbg_dir = capture_paths().data_dir
-                (Path(dbg_dir) / "last_error.txt").write_text(
-                    f"llm_request: {type(exc).__name__}\n")
-            except Exception:
-                pass
         logger.debug("ipm: llm_request middleware skipped (%s)", type(exc).__name__)
         return None  # fail open here; llm_execution re-checks the final request
 
@@ -189,8 +199,11 @@ def on_llm_execution(**kwargs: Any):
     - ⛔ route and block_training -> block
     - ⚠️ route and not allow_unverified -> block
     - required flag missing after second chance -> block
-    - memory block present with use_memory=false -> block
+    - memory block present (or strip ambiguous) with use_memory=false -> block
 
+    On an INTERNAL error we fail CLOSED where the transport allows a synthetic
+    block: an unchecked request to a training route is worse than a failed
+    turn. Pass-through remains only for api_modes with no synthetic shape.
     next_call is invoked exactly once, OUTSIDE the guarded section: a downstream
     provider error must propagate as-is (never re-run the call, never swallow).
     """
@@ -198,6 +211,7 @@ def on_llm_execution(**kwargs: Any):
     request = kwargs.get("request")
     if not isinstance(request, dict) or not callable(next_call):
         return next_call(request) if callable(next_call) else None
+    api_mode = kwargs.get("api_mode")
     block_message: str | None = None
     payload = request
     try:
@@ -227,18 +241,48 @@ def on_llm_execution(**kwargs: Any):
                     payload, _tr = transforms.apply_provider_routing(payload)
 
             if block_message is None and _memory_strip_active(settings, entry):
-                if transforms.memory_markers_present(payload):
+                if transforms.memory_markers_present(payload) or _strip_ambiguous(payload):
                     block_message = _block_message(verdict, "memory content still present in request")
     except Exception:
-        # MY failure only: fail closed inside our code is a BLOCK, but we cannot
-        # safely substitute a synthetic in every transport — so re-check cheaply:
-        # treat as passthrough (Hermes still has the llm_request copy-on-write
-        # flags applied upstream; strip already ran there). Never call next_call twice.
-        logger.debug("ipm: llm_execution re-check skipped")
+        # Internal failure -> fail closed when this transport supports a
+        # synthetic block; otherwise pass the llm_request copy through (the
+        # upstream middleware already applied flags/strip on that copy).
+        synthetic_msg = "Blocked by private mode: the private-mode check could not run."
+        shaped = synthetic.block_response(api_mode, synthetic_msg)
+        if shaped is not None:
+            logger.debug("ipm: llm_execution internal error -> synthetic block")
+            return shaped
+        logger.debug("ipm: llm_execution re-check skipped (no synthetic shape)")
         return next_call(request)
     if block_message is not None:
-        return synthetic.block_response(kwargs.get("api_mode"), block_message)
+        return synthetic.block_response(api_mode, block_message)
     return next_call(payload)
+
+
+def _strip_ambiguous(payload: dict[str, Any]) -> bool:
+    """True when a strip pass could not prove full removal (multi-paragraph
+    entries under a fallback boundary, or unpaired context tags)."""
+    try:
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            for i, msg in enumerate(messages):
+                if not isinstance(msg, dict):
+                    continue
+                if strip_mod.is_system_message(msg, i) and strip_mod.has_memory_block(
+                        str(msg.get("content")) if isinstance(msg.get("content"), str) else ""):
+                    return True  # header survived a strip pass
+                if strip_mod.is_user_message(msg) and isinstance(msg.get("content"), str):
+                    if strip_mod.span_residue(msg["content"]):
+                        return True
+        inp = payload.get("input")
+        if isinstance(inp, list):
+            for item in inp:
+                if isinstance(item, dict) and item.get("role") == "user" and isinstance(item.get("content"), str):
+                    if strip_mod.span_residue(item["content"]):
+                        return True
+    except Exception:
+        return False
+    return False
 
 
 def on_pre_tool_call(**kwargs: Any):
