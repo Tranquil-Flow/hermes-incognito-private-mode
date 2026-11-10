@@ -19,7 +19,8 @@ from ipm.settings import (
 
 def test_defaults_match_spec():
     assert DEFAULTS["mode"] == "private"
-    assert DEFAULTS["apply_to_platforms"] == ["cli", "tui", "desktop"]
+    # §6: no default deletion on a surface whose row is not pass — tui/desktop opt-in
+    assert DEFAULTS["apply_to_platforms"] == ["cli"]
     assert DEFAULTS["remove_history_on_close"] is True
     assert DEFAULTS["keep_history"] is False
     assert DEFAULTS["use_memory"] is False
@@ -54,7 +55,10 @@ def test_provider_controls_apply_on_all_platforms_while_private():
 def test_platform_scope_for_cleanup():
     settings = dict(DEFAULTS)
     assert platform_in_cleanup_scope("cli", settings) is True
-    assert platform_in_cleanup_scope("desktop", settings) is True
+    # §6: no default deletion on a surface whose row is not pass — opt-in only
+    assert platform_in_cleanup_scope("desktop", settings) is False
+    assert platform_in_cleanup_scope("tui", settings) is False
+    assert platform_in_cleanup_scope("desktop", dict(settings, apply_to_platforms=["cli", "desktop"])) is True
     assert platform_in_cleanup_scope("telegram", settings) is False  # messaging: no cleanup (§3.10)
     assert platform_in_cleanup_scope("cron", settings) is False
 

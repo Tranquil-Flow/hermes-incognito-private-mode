@@ -24,8 +24,8 @@ config_schema:
     description: "private | off. off disables every protection for chats that are not forced on."
   apply_to_platforms:
     type: list
-    default: [cli, tui, desktop]
-    description: "Surfaces where history cleanup may run. Provider flags, memory strip and tool vetoes apply on all platforms while mode != off."
+    default: [cli]
+    description: "Surfaces where history cleanup may run (§6: no default deletion on a surface whose row is not pass — add tui/desktop explicitly once you accept their interactive rows). Provider flags, memory strip and tool vetoes apply on all platforms while mode != off."
   remove_history_on_close:
     type: bool
     default: true

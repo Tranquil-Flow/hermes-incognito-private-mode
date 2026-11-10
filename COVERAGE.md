@@ -17,14 +17,14 @@ Legend: ✅ e2e-verified · 🧪 unit/contract-verified · ⏸️ blocked (reaso
 | 5 | Memory strip | ✅ non-vacuous | Control (plugin disabled, fresh gateway): **1 of 6** wire requests carries `MEMORY (your personal notes) [3% — 71/2,200 chars]` + sentinel entry. Protected: **0 of 16** requests carry any memory marker while the same MEMORY.md/USER.md sentinels are on disk and (post-strip) absent from every outgoing request. Copy-on-write asserted in unit tests. |
 | 6 | Tool vetoes | 🧪 | Unit: `memory`/`skill_manage`/`session_search`/external-provider vetoes; `/private on` forces private in mode off; pass-through for unrelated tools. Live veto attempt blocked by expired harness OAuth (⏸️ row 22) — the veto path is a synchronous pre-tool hook, unit-verified. |
 | 7 | CLI quit | ✅ | One-shot `chat -q` exits → row ends `cli_close`; post-consent sessions deleted on next activity (see row 9). |
-| 8 | `/new` | 🧪 | Source pin: `new_session` written by `hermes_cli/cli_session_mixin.py` (contract test); allowlist covers it; interactive pty automation deferred (TUI input automation — disclosed in README). |
+| 8 | `/new` | ⏸️ delivery-only skip | Removal mechanism = row 7/9 path, e2e-proven (armed + cli_close + consented → swept on next activity; new chat untouched). The `/new` keystroke needs the interactive TUI; headless pty attach fails (boots, 0 tokens, no command execution). §6 holds: cli-only default, nothing deletes on unproven surfaces. |
 | 9 | Fenced delete e2e | ✅ | Post-consent closed chats deleted via the fence: **0 rows, 0 messages, 0 FTS hits, 0 files** (`sessions|0`, `messages|0`, no dump files, WAL `busy=0`); `last_sweep: deleted=1`; `status` shows `Sessions: deleted=4, excluded=1`. |
-| 10 | TUI close | 🧪 | `tui_close` in allowlist + source pin (tui_gateway/session_lifecycle.py); same finalize path as CLI. |
+| 10 | TUI close | ⏸️ + made safe | GUI-only surface (not headless-driveable); same removal mechanism as rows 7/9 (unit + row-7/9 e2e). Per §6 `apply_to_platforms` now defaults to `["cli"]` — tui/desktop cleanup strictly opt-in; pinned by tests (`test_platform_scope_for_cleanup`, schema≡DEFAULTS). |
 | 11 | Automatic reasons leave rows | ✅/🧪 | Unit: `ws_disconnect`-closed row survives; e2e row 20 (open row survives kill) proves the closed-only rule live. |
 | 12 | Blocked-route aux disclosure | ✅ | Live observation during row 4: aux title call attempted against the blocked route independently (401) — the banner's "Background calls may already have run" is literally true; `status` line 2 discloses non-enforcement. |
 | 13 | Pre-setup chats survive | ✅ | Pre-consent chat closed and survived all later sweeps (`row16 survives: 1`); ledger shows `excluded: cleanup not enrolled` for 13 pre-consent sessions. |
 | 14 | Delegate subagents | 🧪 | Unit: delegate child (model_config `_delegate_from`) with no ledger entry refuses the whole fenced delete; parents/children verified untouched in the real-schema DB. |
-| 15 | `/private keep` | 🧪 | Unit: kept session excluded + survives sweeps across generations. Interactive CLI ack deferred (see row 8). |
+| 15 | `/private keep` | ✅ e2e (core) | Real-session e2e: `chat -q` turn → keep handler (slash command's own write, in-process) → real `cli_close` → next-activity sweep → session SURVIVED: row present, 2 messages intact, ledger `excluded`+`keep`. Confirmation: non-kept closed sessions force `chat -q` id rotation; the kept one stayed resumable. Delegate-child fence-refusal half unit-pinned. |
 | 16 | No consent → nothing ever deleted | ✅ | Every pre-consent session in the live harness ledger is `excluded: cleanup not enrolled`; sweeps ran (`last_sweep` recorded) and deleted 0 of them. |
 | 17 | Neighbour-safety (abc/abc_extra) | ✅/🧪 | Contract: dump-name timestamp regex cannot match neighbour dumps (exact-name corpus test); unit: neighbour rows never touched; e2e: 29 unrelated session files intact post-sweep. |
 | 18 | Profile switches | 🧪 | Unit: `_plugin_home_key`-style per-home state (store paths derive from captured home); generation requirement excludes sessions born pre-switch. |
@@ -54,8 +54,9 @@ Honest notes the audit raised that are NOT silently dropped:
 - COVERAGE row numbers differed from BUILD_SPEC §6 (rows 12/14/18/24 were
   mislabeled or untested). The underlying failures (compaction lineage,
   mode-off generations) are FIXED and regression-tested; the interactive rows
-  (8/10/15) remain unit/source-pinned, not pty-e2e. tui/desktop remain in the
-  default cleanup scope pending a row-10 e2e — review before shipping.
+  (8/10) are now skipped-with-reason AND made safe by the §6 opt-in default
+  (`apply_to_platforms: [cli]`); row 15's core keep-survival property is e2e
+  verified over real sessions.
 - Ledger `deleted_how` was always "external" before the fix (our own fence
   fired on_session_delete); now "fenced" during intent-guarded deletes.
 - `last_sweep.attempted` under-reported (always 0); fixed.

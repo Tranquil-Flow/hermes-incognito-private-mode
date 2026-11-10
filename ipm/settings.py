@@ -23,7 +23,10 @@ PLUGIN_ID = "incognito-private-mode"
 
 DEFAULTS: dict[str, Any] = {
     "mode": "private",
-    "apply_to_platforms": ["cli", "tui", "desktop"],
+    # §6: "No default deletion on a surface whose row is not pass." Rows 8/10/15
+    # (TUI/Desktop interactive surfaces) are not independently e2e-proven, so
+    # cleanup defaults to cli only; tui/desktop are opt-in via this key.
+    "apply_to_platforms": ["cli"],
     "remove_history_on_close": True,
     "keep_history": False,
     "use_memory": False,
