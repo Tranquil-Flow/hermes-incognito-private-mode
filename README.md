@@ -57,7 +57,7 @@ No extra dependencies; Hermes-provided SDK types only. AGPL-3.0.
 |---|---|---|
 | 1. Main chat requests | Curated route table classifies the endpoint **host** (authoritative) + provider id. ⛔ training routes blocked outright; ⚠️ unverified/unknown routes allowed-with-warning by default (strict mode, used by both presets, blocks them); ok-if-flagged routes get `extra_body.provider.data_collection=deny, zdr=true` injected copy-on-write. | enforced |
 | 2. Background calls (titles, compression, vision) | Classification and counting only. Aux calls are **not** intercepted; `status` says so explicitly. | disclosed, not enforced |
-| 3. On this machine | Consent-gated history removal: sessions are hashed (SHA-256, `s:`-prefixed) into a provenance ledger; after you close a chat on a surface in `apply_to_platforms` (default: CLI only), an opportunistic sweep deletes that chat's rows, messages, FTS entries and dump files through Hermes' own fenced public API. Compression parents are not deleted (see *What stays*). | enforced after setup consent, CLI chats by default |
+| 3. On this machine | Consent-gated history removal: sessions are hashed (SHA-256, `s:`-prefixed) into a provenance ledger; after you close a chat on a surface in `apply_to_platforms` (default: CLI only), an opportunistic sweep deletes that chat's rows, messages, FTS entries and dump files through Hermes' own fenced public API. Compression parents are not deleted (see *What stays*). | enforced after setup consent; unproven CLI close paths (/new, resume switch, branch) never auto-delete — only quitting the CLI is proven |
 
 Plus:
 
