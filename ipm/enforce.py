@@ -483,9 +483,10 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
             for i, msg in enumerate(messages):
                 if not isinstance(msg, dict):
                     continue
-                if strip_mod.is_system_message(msg, i) and strip_mod.has_memory_block(
-                        str(msg.get("content")) if isinstance(msg.get("content"), str) else ""):
-                    return True  # header survived a strip pass
+                if strip_mod.is_system_message(msg, i):
+                    for text in strip_mod.content_texts(msg.get("content")):
+                        if strip_mod.has_memory_block(text) or strip_mod.memory_title_residue(text):
+                            return True  # header survived (or lost its rules) — block
                 if strip_mod.is_user_message(msg):
                     for text in strip_mod.content_texts(msg.get("content")):
                         if _text_residue(text):

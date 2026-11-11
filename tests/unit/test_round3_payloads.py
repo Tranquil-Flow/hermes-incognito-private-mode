@@ -200,3 +200,15 @@ def test_audit_append_really_waits_for_store_lock(world, monkeypatch):
     thread.join(timeout=5)
     assert not thread.is_alive() and entered.is_set()
     assert json.loads((paths.data_dir / "audit.jsonl").read_text())["label"] == "probe"
+
+
+def test_ascii_retry_stripped_rules_still_block(world):
+    """Astra F3.A: core's ASCII-retry sanitizer removes the Unicode rule lines
+    around memory titles; the recognizable title alone must still block at the
+    final boundary (never silently pass)."""
+    title = "MEMORY (your personal notes) [24% \u2014 40/2,200 chars]"
+    ascii_mangled = f"MEMORY (your personal notes) [24%  40/2,200 chars]\nprivate SNAPSHOT-ASCII-TAIL"
+    payload = request(ascii_mangled)
+    result, seen = send(payload)
+    assert result != "sent" and seen == []
+    assert "SNAPSHOT-ASCII-TAIL" in str(payload)  # intact, not sent
