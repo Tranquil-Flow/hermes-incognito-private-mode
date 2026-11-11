@@ -78,7 +78,11 @@ class PrivateLogFilter(logging.Filter):
         except Exception:
             return
         if record.name == "hermes.tool_calls":
-            new = _TOOL_PREVIEW_RE.sub(r"\1[redacted]", rendered)
+            # Nuke EVERYTHING after the '<ts>  <tool>:' prefix: quoted-preview
+            # matching alone leaked any tail after the closing quote (2026-11-11
+            # adversarial round).
+            m = re.match(r"^(\S+\s+\S+\s+\S+:\s)", rendered)
+            new = (rendered[: m.end()] + "[redacted]") if m else "[redacted]"
         else:
             scan = rendered[:_SCAN_CAP]
             new = _MSG_RENDERED_RE.sub(lambda m: m.group(0)[: m.group(0).index("=") + 1] + "[redacted]", scan)
@@ -86,7 +90,8 @@ class PrivateLogFilter(logging.Filter):
                 new = _MSG_UNQUOTED_RE.sub(r"\1[redacted]", scan)
             new = _REPLY_TEXT_RE.sub(lambda m: m.group(0)[: m.group(0).index("=") + 1] + "[redacted]", new)
             if len(rendered) > _SCAN_CAP:
-                new = new + rendered[_SCAN_CAP:]
+                # Never append the unscanned tail raw (leaked secrets past cap).
+                new = new + " …[redacted beyond scan cap]"
         if new != rendered:
             record.msg = new
             record.args = None

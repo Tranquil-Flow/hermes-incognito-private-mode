@@ -165,3 +165,21 @@ def test_finalize_no_false_disclosure_without_lineage(patch_capture):
     notice = finalize("solo-1", "cli", patch_capture)
     assert notice is not None
     assert "earlier part(s)" not in notice
+
+
+# --- host-authoritative classification (adversarial round MEDIUM) -----------
+
+def test_custom_provider_on_curated_training_host_gets_host_policy():
+    """'custom' + api.moonshot.ai must see kimi's NONE_TRAINS policy (block),
+    never UNKNOWN/warn — the host is authoritative."""
+    from ipm.routes import classify
+    verdict = classify("custom", "https://api.moonshot.ai/v1", "chat_completions",
+                       None, None, None, None)
+    assert verdict.label == "block", f"got {verdict.label}: {verdict.reasons}"
+
+
+def test_custom_provider_on_curated_openrouter_host_gets_flags():
+    from ipm.routes import classify
+    verdict = classify("custom", "https://openrouter.ai/api/v1", "chat_completions",
+                       None, None, None, None)
+    assert verdict.label in {"ok-if-flagged", "ok"}, verdict.label

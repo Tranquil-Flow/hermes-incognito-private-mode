@@ -37,7 +37,7 @@ def validate_session_id(session_id: str) -> bool:
         return False
     import re
 
-    return re.match(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$", session_id) is not None
+    return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}", session_id) is not None
 
 
 def _path(data_dir: Path, kind: str) -> Path:

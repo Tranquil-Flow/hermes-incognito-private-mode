@@ -171,15 +171,24 @@ def _audit_append(paths: Any, record: dict[str, Any]) -> None:
         record = {"ts": round(time.time(), 3), **record}
         line = json.dumps(record, ensure_ascii=False)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text(line + "\n")
-            os.chmod(path, 0o600)
-            return
-        if path.stat().st_size > _AUDIT_MAX_BYTES:
-            lines = path.read_text().splitlines()
-            path.write_text("\n".join(lines[len(lines) // 2:]) + "\n")
-        with open(path, "a") as fh:
-            fh.write(line + "\n")
+        try:
+            os.chmod(path.parent, 0o700)
+        except Exception:
+            pass
+        # Append under the store lock: concurrent gateway/CLI processes must
+        # not interleave the truncate-and-rewrite cap rotation.
+        from . import store as _store
+
+        with _store.store_lock(paths.data_dir):
+            if not path.exists():
+                path.write_text(line + "\n")
+                os.chmod(path, 0o600)
+                return
+            if path.stat().st_size > _AUDIT_MAX_BYTES:
+                lines = path.read_text().splitlines()
+                path.write_text("\n".join(lines[len(lines) // 2:]) + "\n")
+            with open(path, "a") as fh:
+                fh.write(line + "\n")
     except Exception as exc:  # audit must never break the request path
         logger.debug("ipm: audit append failed (%s)", type(exc).__name__)
 
@@ -359,6 +368,18 @@ def on_llm_execution(**kwargs: Any):
         shaped = synthetic.block_response(api_mode, synthetic_msg)
         if shaped is not None:
             logger.debug("ipm: llm_execution internal error -> synthetic block")
+            try:
+                _audit_append(capture_paths(), {
+                    "provider": kwargs.get("provider"),
+                    "host": "",
+                    "scheme": "",
+                    "label": "internal-error",
+                    "policy": "fail-closed",
+                    "blocked": True,
+                    "persona": None,
+                })
+            except Exception:
+                pass
             return shaped
         logger.debug("ipm: llm_execution re-check skipped (no synthetic shape)")
         return next_call(request)

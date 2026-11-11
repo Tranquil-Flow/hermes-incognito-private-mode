@@ -147,8 +147,13 @@ def _row_matches(row: dict[str, Any], *, host: str, provider: str | None, auth_h
                 om = other.get("match") or {}
                 if host in {h.lower() for h in (om.get("base_url_hosts") or [])}:
                     return False  # claimed by a curated row: let it match instead
-    if provider_ids and (provider or "").lower() not in provider_ids:
-        return False
+    if not hosts and provider_ids and (provider or "").lower() not in provider_ids:
+        return False  # provider-only rows bind by id (over unclaimed hosts)
+    # Host-listing rows: the HOST is authoritative — a request aimed at a
+    # curated host gets that host's policy regardless of the provider label
+    # ('custom' + api.moonshot.ai must see kimi's NONE_TRAINS, not UNKNOWN).
+    # (The reverse spoofing direction — a provider id re-labeling a claimed
+    # host — is already impossible: provider-only rows refuse claimed hosts.)
     if not _auth_matches(match.get("auth", "any"), auth_hint):
         return False
     api_modes = match.get("api_modes")

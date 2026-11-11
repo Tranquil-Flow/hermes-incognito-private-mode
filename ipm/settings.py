@@ -107,7 +107,7 @@ def read_settings(paths: CapturedPaths | None = None) -> dict[str, Any]:
     config_path = paths.home / "config.yaml"
     try:
         st = config_path.stat()
-        cache_key = (str(config_path), st.st_mtime_ns, st.st_size)
+        cache_key = (str(config_path), st.st_mtime_ns, st.st_size, st.st_ino)
     except OSError:
         cache_key = (str(config_path), None, None)
     with _cache_lock:
