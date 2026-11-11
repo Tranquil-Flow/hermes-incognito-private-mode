@@ -1,4 +1,5 @@
 # incognito-private-mode
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/067b8f4b-01f1-4490-8f08-933bfc36afd3" />
 
 **Private Mode, honestly.** A Hermes plugin that adds privacy controls you can
 check: provider privacy flags, memory stripping, tool vetoes, and
