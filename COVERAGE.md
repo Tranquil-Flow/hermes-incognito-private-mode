@@ -61,6 +61,28 @@ Honest notes the audit raised that are NOT silently dropped:
   fired on_session_delete); now "fenced" during intent-guarded deletes.
 - `last_sweep.attempted` under-reported (always 0); fixed.
 
+## Post-audit feature round (2026-11-11)
+
+- **Usability presets** (`preset complete` / `preset provider-private` + wizard
+  picker + status detection): writer-only — sets explicit, inspectable values;
+  never grants cleanup consent. Pinned by 8 tests (shape, roundtrip, CLI apply,
+  consent-untouched, status line).
+- **Plaintext-remote block**: `allow_plaintext_remote` default false — http://
+  to non-loopback hosts blocked with plain-English reason. 3 tests.
+- **Persona strip** (`strip_persona`, default false): best-effort exact-span
+  SOUL.md removal with honest "present-not-located" disclosure in the audit
+  trail. 3 tests. Known bound: if core post-processing alters the text, the
+  strip cannot match — disclosed, never falsely claimed.
+- **Outbound audit log**: `audit.jsonl` (0600, capped 512KB→newest half),
+  content-free metadata only (endpoint/verdict/actions — asserted by test that
+  the user content string is absent); `/private status` summarises last hour.
+- **DeepSeek LIVE row (extra)**: `deepseek-chat` turn completed (exit 0);
+  memory veto observed live (blocked message, MEMORY.md md5 unchanged, canary
+  absent); ⚠️ unverified label correct. Second real provider with the full
+  chain proven, alongside Nous.
+
+Suite: **113 passed** · validate green · commits eaf51f7/201d9b0/6991ef5.
+
 ## Checkpoint-1 metric (rows 1–3, 6, 7–9, 13, 16, 17)
 
 **7 of 9 fully green with e2e evidence; row 6 unit-green (live veto pending owner
