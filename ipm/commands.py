@@ -15,7 +15,7 @@ import sys
 import time
 from typing import Any
 
-from . import lifecycle, routes as routes_mod
+from . import lifecycle, presets, routes as routes_mod
 from .settings import (
     capture_paths,
     cleanup_enrolled,
@@ -76,7 +76,7 @@ def _audit_summary(paths: Any) -> str | None:
 def status_text(paths=None) -> str:
     paths = paths or capture_paths()
     settings = read_settings(paths)
-    from . import store
+    from . import presets, store
 
     meta = store.read("meta", paths.data_dir)
     ledger = store.read("ledger", paths.data_dir)
@@ -92,6 +92,9 @@ def status_text(paths=None) -> str:
     lines = [
         f"Private Mode: {'ON' if mode_line == 'private' else 'OFF'} — coverage, never a blanket Incognito:",
     ]
+    profile = presets.detect_preset(settings)
+    profile_line = f"Profile: {profile}" if profile else "Profile: custom"
+    lines.append(profile_line)
     lines.extend(routes_mod.coverage_lines(facts, confirmations, None, settings, cleanup_active=enrolled))
     lines.append("")
     lines.append(f"History cleanup: {'enabled (consent recorded)' if enrolled else 'NOT enabled — run `hermes incognito-private-mode setup` to enable history removal'}")
@@ -188,6 +191,16 @@ def run_setup(paths=None) -> int:
     print("This wizard customises them and gates history removal. Nothing is deleted here.")
     print()
     settings = read_settings(paths)
+    print("Pick a starting point (Enter = 1):")
+    print("  1) " + presets.blurb("complete"))
+    print("  2) " + presets.blurb("provider-private"))
+    print("  3) Custom — answer each question (defaults shown)")
+    choice = _ask("Profile", "1")
+    preset_name = {"1": "complete", "2": "provider-private"}.get(choice.strip())
+    if preset_name:
+        settings = presets.apply_preset(preset_name, settings)
+        print(f"  -> {preset_name} preset applied to the defaults below (you can still change any answer).")
+        print(f"  Note: history removal consent is asked separately and is never pre-granted.")
     mode = _ask("Mode (private/off)", str(settings.get("mode", "private"))).lower()
     if mode not in {"private", "off"}:
         mode = "private"
@@ -226,6 +239,10 @@ def run_setup(paths=None) -> int:
         if answer.startswith("y"):
             confirmations[key] = {"confirmed_at": time.time(), "note": "confirmed in setup"}
     print()
+    allow_plaintext = _ask("  Allow http:// to non-loopback hosts (cleartext)? y/N",
+                           "y" if settings.get("allow_plaintext_remote", False) else "n").lower()
+    strip_persona = _ask("  Strip your SOUL.md persona from prompts (best-effort)? y/N",
+                         "y" if settings.get("strip_persona", False) else "n").lower()
     new_settings = {
         "mode": mode,
         "apply_to_platforms": [p.strip() for p in platforms.split(",") if p.strip() in {"cli", "tui", "desktop"}],
@@ -234,6 +251,9 @@ def run_setup(paths=None) -> int:
         "learn_skills": learn_skills.startswith("y"),
         "keep_history": keep_history.startswith("y"),
         "allow_unverified": allow_unverified.startswith("y"),
+        "allow_plaintext_remote": allow_plaintext.startswith("y"),
+        "strip_persona": strip_persona.startswith("y"),
+        "audit_log": bool(settings.get("audit_log", True)),
         "block_training": block_training.startswith("y"),
         "deep_clean_reminder": reminder if reminder in {"weekly", "monthly", "off"} else "weekly",
     }
@@ -299,6 +319,9 @@ def cli_register(setup_fn) -> None:
     sub.add_parser("cleanup", help="Run one sweep now and print per-session outcomes (hashed ids)")
     sub.add_parser("deep-clean", help="Show DB size, free disk and the manual deep-clean steps")
     sub.add_parser("setup", help="Guided setup (TTY only); records cleanup consent")
+    preset_p = sub.add_parser("preset", help="Apply a settings profile (non-interactive)")
+    preset_p.add_argument("name", choices=["complete", "provider-private"],
+                          help="complete = nothing kept anywhere; provider-private = Hermes features on, providers locked down")
 
 
 def cli_handler(args, **_kw: Any) -> int:
@@ -306,6 +329,22 @@ def cli_handler(args, **_kw: Any) -> int:
     command = getattr(args, "ipm_command", "status") or "status"
     if command == "setup":
         return run_setup(paths)
+    if command == "preset":
+        name = getattr(args, "preset_name", "")
+        applied = presets.apply_preset(name, read_settings(paths))
+        if applied is None:
+            print(f"unknown preset: {name} (choose complete | provider-private)")
+            return 1
+        from hermes_cli.plugins_state import save_plugin_setting
+        try:
+            for key, value in presets.PRESETS[name].items():
+                save_plugin_setting("incognito-private-mode", (key,), value)
+        except PermissionError as exc:
+            print(f"Settings are managed on this install: {exc}")
+            return 1
+        print(f"Applied preset '{name}': " + presets.blurb(name))
+        print("History removal still needs consent: hermes incognito-private-mode setup")
+        return 0
     if command == "cleanup":
         print("\n".join(lifecycle.cleanup_outcomes(paths)))
         return 0

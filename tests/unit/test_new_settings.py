@@ -51,6 +51,7 @@ def test_plaintext_remote_allowed_when_opted_in(patch_capture):
     from hermes_cli.plugins_state import save_plugin_setting
     from ipm.enforce import on_llm_execution
     save_plugin_setting("incognito-private-mode", ("allow_plaintext_remote",), True)
+    save_plugin_setting("incognito-private-mode", ("allow_unverified",), True)  # self-contained
     try:
         seen = {}
 
@@ -65,6 +66,7 @@ def test_plaintext_remote_allowed_when_opted_in(patch_capture):
         assert seen.get("called") is True
     finally:
         save_plugin_setting("incognito-private-mode", ("allow_plaintext_remote",), False)
+        save_plugin_setting("incognito-private-mode", ("allow_unverified",), True)
 
 
 def test_persona_stripped_from_system_prompt(patch_capture):
