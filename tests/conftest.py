@@ -36,6 +36,10 @@ class FakePaths:
         self.sessions_dir = self.home / "sessions"
         self.logs_dir = self.home / "logs"
         self.data_dir = root / "plugin-data"
+        # Mirror CapturedPaths' memory-strip sources (contract-tested below so
+        # the stand-in can never drift from production again).
+        self.memory_path = self.home / "memories" / "MEMORY.md"
+        self.user_profile_path = self.home / "memories" / "USER.md"
         self.home.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)

@@ -56,13 +56,19 @@ _cache_lock = threading.Lock()
 class CapturedPaths:
     """Immutable profile inputs captured inside the invoking hook."""
 
-    __slots__ = ("home", "db_path", "data_dir", "sessions_dir", "logs_dir")
+    __slots__ = ("home", "db_path", "data_dir", "sessions_dir", "logs_dir",
+                 "memory_path", "user_profile_path")
 
     def __init__(self, home: Path) -> None:
         self.home = home
         self.db_path = home / "state.db"
         self.sessions_dir = home / "sessions"
         self.logs_dir = home / "logs"
+        # Memory strip sources (§3.5): the files core renders MEMORY/USER
+        # blocks from. Their EXISTENCE is not assumed — readers handle
+        # OSError/None.
+        self.memory_path = home / "memories" / "MEMORY.md"
+        self.user_profile_path = home / "memories" / "USER.md"
         try:
             from hermes_cli.plugins_state import PluginState  # public allowlist
 

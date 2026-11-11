@@ -251,3 +251,27 @@ def test_session_id_regex_spec():
     assert validate_session_id("A1b2C3.d:e_f-g")
     assert not validate_session_id("x/y")
     assert not validate_session_id("x y")
+
+
+def test_fakepaths_never_drifts_from_capturedpaths():
+    """The conftest stand-in must expose every CapturedPaths attribute — a
+    missing attr silently disabled the memory strip in production while tests
+    stayed green (2026-11-11 adversarial round, HIGH-1)."""
+    import inspect
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parents[1]))
+    from ipm.settings import CapturedPaths
+    from conftest import FakePaths
+
+    slots = set(CapturedPaths.__slots__)
+    for slot in slots:
+        assert hasattr(FakePaths, slot) or slot in FakePaths.__init__.__code__.co_names or True
+    # Build both and compare attribute surfaces
+    import tempfile
+    root = Path(tempfile.mkdtemp())
+    fake = FakePaths(root)
+    real = CapturedPaths(root / "fakehome")
+    for slot in slots:
+        assert hasattr(fake, slot), f"FakePaths missing CapturedPaths attr: {slot}"

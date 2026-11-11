@@ -856,9 +856,35 @@ def finalize(session_id: str | None, platform: str | None, paths: CapturedPaths,
     else:
         notice = NOTICE_KEPT if override in {"off", "keep"} else None
     maybe_sweep(paths, trigger="finalize", force=True)
+    if notice and notice is not NOTICE_KEPT:
+        remaining = _remaining_lineage_members(ledger, str(session_id))
+        if remaining:
+            notice = (f"{notice}\n⚠ {remaining} earlier part(s) of this chat remain "
+                      "(compressed sections never close cleanly, so they are kept — "
+                      "open rows are sacred). See /private status.")
     if notice:
         return f"{notice}\n{NOTICE_COPIES}"
     return None
+
+
+def _remaining_lineage_members(ledger: dict[str, Any], session_id: str) -> int:
+    """Count ledger-known lineage relatives of this chat that are NOT deleted
+    (compression roots, kept continuations). Hashed ids only, read-only."""
+    from . import store
+
+    key = store.hash_session_id(session_id)
+    entry = ledger.get(key)
+    if not isinstance(entry, dict):
+        return 0
+    relatives: set[str] = set(entry.get("children") or [])
+    if entry.get("parent_hash"):
+        relatives.add(str(entry["parent_hash"]))
+    n = 0
+    for rel in relatives:
+        rel_entry = ledger.get(rel)
+        if isinstance(rel_entry, dict) and rel_entry.get("state") not in {None, "deleted"}:
+            n += 1
+    return n
 
 
 def cleanup_outcomes(paths: CapturedPaths) -> list[str]:
@@ -876,7 +902,15 @@ def cleanup_outcomes(paths: CapturedPaths) -> list[str]:
         if state == "deleted":
             lines.append(f"{key[:12]}…: deleted ({entry.get('deleted_how', 'fenced')})")
         elif state == "armed":
-            lines.append(f"{key[:12]}…: queued (closed; retried on next activity)")
+            raw_id = entry.get("raw_id") or ""
+            closed = False
+            try:
+                row = read_row(paths.db_path, str(raw_id)) if raw_id else None
+                closed = row is not None and row_is_closed(row)
+            except Exception:
+                closed = False
+            why = "closed; retried on next activity" if closed else "waiting to close"
+            lines.append(f"{key[:12]}…: queued ({why})")
         elif state == "candidate":
             lines.append(f"{key[:12]}…: pending (chat not closed yet)")
     return lines

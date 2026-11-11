@@ -43,6 +43,11 @@ _BLOCK_TEMPLATE = (
 
 _memory_bodies_cache: dict[str, Any] = {"sig": None, "bodies": []}
 
+# Ambiguity signal from the llm_request strip pass, consumed by the same
+# thread's llm_execution (request and execution hooks run sequentially on one
+# thread for a given request; thread-local keeps concurrent requests isolated).
+_strip_state = __import__("threading").local()
+
 
 def _confirmations(data_dir) -> dict[str, Any]:
     from . import store
@@ -69,8 +74,15 @@ def _memory_bodies(paths) -> list[str]:
     if _memory_bodies_cache["sig"] == key:
         return _memory_bodies_cache["bodies"]
     bodies: list[str] = []
+    from .strip import MEMORY_TITLE_RE
+
     for text in texts:
-        entries = [e.strip() for e in text.split("\n§\n")]
+        segments = text.split("\n§\n")
+        # The file's first segment is the BLOCK TITLE (core renders
+        # rule\nTITLE\nrule\n + entries joined by \n§\n) — not an entry.
+        if segments and MEMORY_TITLE_RE.match(segments[0].split("\n")[0].strip()):
+            segments = segments[1:]
+        entries = [e.strip() for e in segments]
         entries = [e for e in entries if e]
         if entries:
             bodies.append("\n§\n".join(entries))
@@ -217,6 +229,7 @@ def on_llm_request(**kwargs: Any):
         if session_id and entry is None:
             _lazy_exclude(str(session_id), platform, paths.data_dir)
 
+        _strip_state.ambiguous = False  # no stale signal from a prior request
         new_request = request
         trace: dict[str, Any] = {"source": "incognito-private-mode", "applied": []}
         confirmations = _confirmations(paths.data_dir)
@@ -236,6 +249,7 @@ def on_llm_request(**kwargs: Any):
             strip_mod.set_memory_bodies(_memory_bodies(paths))
             new_request, counts = strip_mod.strip_request(new_request)
             strip_mod.reset_memory_bodies()
+            _strip_state.ambiguous = bool(counts.get("ambiguous"))
             if counts["blocks"] or counts["spans"]:
                 trace["applied"].append(
                     f"stripped memory blocks={counts['blocks']} spans={counts['spans']}")
@@ -306,8 +320,13 @@ def on_llm_execution(**kwargs: Any):
                     payload, _tr = transforms.apply_provider_routing(payload)
 
             if block_message is None and _memory_strip_active(settings, entry):
-                if transforms.memory_markers_present(payload) or _strip_ambiguous(payload):
-                    block_message = _block_message(verdict, "memory content still present in request")
+                strip_ambiguous = bool(getattr(_strip_state, "ambiguous", False))
+                _strip_state.ambiguous = False  # consume: one request, one signal
+                if (transforms.memory_markers_present(payload) or _strip_ambiguous(payload)
+                        or strip_ambiguous):
+                    block_message = _block_message(
+                        verdict, "memory content could not be proven fully removed "
+                        "(exact reconstruction failed)")
 
             persona_state = None
             if settings.get("strip_persona", False) and block_message is None:

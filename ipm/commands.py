@@ -320,8 +320,8 @@ def cli_register(setup_fn) -> None:
     sub.add_parser("deep-clean", help="Show DB size, free disk and the manual deep-clean steps")
     sub.add_parser("setup", help="Guided setup (TTY only); records cleanup consent")
     preset_p = sub.add_parser("preset", help="Apply a settings profile (non-interactive)")
-    preset_p.add_argument("name", choices=["complete", "provider-private"],
-                          help="complete = nothing kept anywhere; provider-private = Hermes features on, providers locked down")
+    preset_p.add_argument("preset_name", choices=["complete", "provider-private"],
+                          help="complete = strict everywhere; provider-private = Hermes features on, providers locked down")
 
 
 def cli_handler(args, **_kw: Any) -> int:
@@ -330,7 +330,7 @@ def cli_handler(args, **_kw: Any) -> int:
     if command == "setup":
         return run_setup(paths)
     if command == "preset":
-        name = getattr(args, "preset_name", "")
+        name = getattr(args, "preset_name", "") or getattr(args, "name", "")
         applied = presets.apply_preset(name, read_settings(paths))
         if applied is None:
             print(f"unknown preset: {name} (choose complete | provider-private)")
