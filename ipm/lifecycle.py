@@ -433,7 +433,12 @@ def on_external_delete(session_id: str, reason: str, paths: CapturedPaths) -> No
             entry["excluded_reason"] = "archived by user"
         return ledger
 
-    store.mutate("ledger", paths.data_dir, fn)
+    # Non-blocking on purpose (round-#4 Opus F9): core may dispatch this hook
+    # to a FRESHLY RELOADED module copy while the old copy's fenced delete
+    # still holds the flock — a blocking mutate would self-deadlock the delete
+    # thread. This is an invalidation hint only; the fence marks its own
+    # targets and residue recovery re-verifies absence later.
+    store.mutate("ledger", paths.data_dir, fn, blocking=False)
 
 
 # --- admission policy ----------------------------------------------------------
@@ -862,15 +867,36 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
                 l[store.hash_session_id(target)]["deleting"] = True
             return l  # mutate persists the dict it returns — flags must survive
 
+        gone: list[str] = []
         with store.store_lock(paths.data_dir):  # admission + delete + verify: one hold
             store.mutate("ledger", paths.data_dir, check)
             if not decision["ok"]:
                 logger.debug("ipm: delete refused (%s)", decision["why"])  # fixed vocabulary, no ids
                 return "refused"
+            # Transcript fence (round-#4 Opus F7): capture each target's exact
+            # display snapshot NOW; core re-checks it inside its own write
+            # transaction, so a /resume plus a new message landing between
+            # admission and the delete aborts the deletion instead of deleting
+            # a chat the user just reopened.
+            expected_display: dict[str, list[dict[str, Any]]] | None = {}
+            try:
+                raw = db.export_session(raw_id, include_compacted=True)
+                expected_display = {
+                    seg["id"]: seg.get("messages") or []
+                    for seg in (raw.get("segments") or [raw]) if seg.get("id")
+                } if raw else None
+            except Exception:
+                expected_display = None
+            if expected_display is None:
+                decision["why"] = "transcript snapshot unavailable"
+                logger.debug("ipm: delete refused (%s)", decision["why"])
+                self_clear(paths, [store.hash_session_id(t) for t in targets])
+                return "refused"
             try:
                 deleted = db.delete_session(
                     raw_id, sessions_dir=None,
                     expected_delete_ids=targets,
+                    expected_display_messages=expected_display,
                     exclude_active_write_guards=True,
                 )
             except Exception:
@@ -909,7 +935,13 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
                     return l
 
                 store.mutate("ledger", paths.data_dir, mark)
-                flush_wal(paths.db_path)
+        # File cleanup + WAL checkpoint run OUTSIDE the lock (round-#4 Opus
+        # F1): they act on already verified-absent ids, and holding the shared
+        # flock across core's media collection and the TRUNCATE checkpoint
+        # stalls every other store user (LLM audit appends, observations).
+        if gone:
+            cleanup_session_files(paths, gone)
+            flush_wal(paths.db_path)
     finally:
         try:
             db.close()

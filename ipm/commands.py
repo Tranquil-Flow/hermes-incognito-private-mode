@@ -15,7 +15,7 @@ import sys
 import time
 from typing import Any
 
-from . import lifecycle, presets, routes as routes_mod
+from . import lifecycle, presets, routes as routes_mod, store
 from .settings import (
     VALID_PLATFORMS,
     capture_paths,
@@ -196,7 +196,13 @@ def handle_private_command(raw_args: str, *, session_id: str | None = None, plat
             return "Private mode: no active session to change."
         from .lifecycle import set_override
 
-        set_override(str(session_id), sub, paths)
+        if not set_override(str(session_id), sub, paths):
+            return "Private mode: could not record that override (invalid session id)."
+        if sub == "keep":
+            from .store import hash_session_id
+            entry = store.read("ledger", paths.data_dir).get(hash_session_id(str(session_id)))
+            if isinstance(entry, dict) and entry.get("state") == "deleted":
+                return "Private mode: this chat was already removed from Hermes history."
         word = {"keep": "kept in history", "off": "off for this chat", "on": "on for this chat"}[sub]
         return f"Private mode {word}."
     if sub == "cleanup":

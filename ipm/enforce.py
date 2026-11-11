@@ -278,12 +278,20 @@ def _persona_in_payload(payload, persona: str) -> bool:
 
 
 def _persona_text(paths: Any) -> str | None:
-    """The user's SOUL.md content as the loader normalizes it (stripped)."""
+    """The user's SOUL.md content exactly as core's loader normalizes it
+    (round-#4 Opus F3: utf-8-sig so a leading BOM cannot hide the persona,
+    stripped, legacy protocol header removed — the same passes core applies
+    before injecting it into the system prompt)."""
     try:
         soul = paths.home / "SOUL.md"
         if not soul.exists():
             return None
-        text = (soul.read_text() or "").strip()
+        text = (soul.read_text(encoding="utf-8-sig") or "").strip()
+        try:
+            from tools.bot_mode_probe import strip_legacy_protocol  # public allowlist
+            text = strip_legacy_protocol(text).strip()
+        except Exception:
+            pass
         return text or None
     except Exception:
         return None
@@ -440,6 +448,15 @@ def on_llm_execution(**kwargs: Any):
                         verdict, "memory content could not be proven fully removed "
                         "(exact reconstruction failed)")
 
+            # Round-#4 Opus F2: MoA aggregation carries a prepared request
+            # (core adds it AFTER llm_request) that neither the request-phase
+            # strip nor the checks above inspect — and its advisor fan-out runs
+            # through auxiliary calls before any middleware. Treat it as
+            # unprovable content and block (disclosed in README What-stays).
+            if block_message is None and request.get("_moa_prepared_request") is not None:
+                block_message = _block_message(
+                    verdict, "MoA aggregation is not enforced by private mode")
+
             persona_state = None
             already = getattr(_strip_state, "persona_stripped", None)
             _strip_state.persona_stripped = None  # consume unconditionally
@@ -526,7 +543,7 @@ def on_llm_execution(**kwargs: Any):
 def _strip_ambiguous(payload: dict[str, Any]) -> bool:
     """True when a strip pass could not prove full removal (multi-paragraph
     entries under a fallback boundary, or unpaired context tags)."""
-    try:
+    if True:  # structure kept; exceptions now propagate (fail closed)
         def _text_residue(text: str) -> bool:
             if not isinstance(text, str):
                 return False
@@ -535,6 +552,12 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
                     or strip_mod.memory_title_residue(text))
         messages = payload.get("messages")
         if isinstance(messages, list):
+            # Round-#4 Opus F3: user messages are checked only for the LAST
+            # one (core injects memory spans per turn). A user who QUOTED a
+            # memory block in an older turn must not wedge the session into a
+            # permanent block.
+            last_user_idx = max((i for i, m in enumerate(messages)
+                                 if isinstance(m, dict) and strip_mod.is_user_message(m)), default=-1)
             for i, msg in enumerate(messages):
                 if not isinstance(msg, dict):
                     continue
@@ -542,7 +565,7 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
                     for text in strip_mod.content_texts(msg.get("content")):
                         if strip_mod.has_memory_block(text) or strip_mod.memory_title_residue(text):
                             return True  # header survived (or lost its rules) — block
-                if strip_mod.is_user_message(msg):
+                if strip_mod.is_user_message(msg) and i == last_user_idx:
                     for text in strip_mod.content_texts(msg.get("content")):
                         if _text_residue(text):
                             return True
@@ -566,8 +589,8 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
             for text in strip_mod.content_texts(instructions):
                 if strip_mod.memory_title_residue(text):
                     return True
-    except Exception:
-        return False
+        # Round-#4 Opus F11: no blanket except here — an error in the residue
+        # scan must reach on_llm_execution's outer handler, which fails CLOSED.
     return False
 
 

@@ -65,8 +65,13 @@ def test_synthetic_anthropic_probe_shape():
 
 
 def test_synthetic_unknown_mode_none():
-    assert synthetic.block_response("bedrock_converse", "blocked") is None
+    # round-4b: bedrock_converse is ChatCompletion-shaped in core's terminal,
+    # so it gets a real dict block instead of the content-free scrub path
+    shaped = synthetic.block_response("bedrock_converse", "blocked")
+    assert shaped is not None and (
+        getattr(shaped, "choices", None) or isinstance(shaped, dict))
     assert synthetic.block_response(None, "blocked") is None
+    assert synthetic.block_response("totally-unknown-mode", "blocked") is None
 
 
 def test_error_classification_no_private_endpoint():

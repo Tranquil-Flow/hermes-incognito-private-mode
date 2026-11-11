@@ -24,7 +24,7 @@ where that stops.
 | **Background calls** (titles, compression, vision, summaries) | classified and disclosed, **not enforced**: no flags, strip or blocks are applied to them | same |
 | **Memory blocks in main-chat requests** | stripped (request blocked if removal cannot be proven) | stripped (same) |
 | **Persona (SOUL.md) in main-chat requests** | stripped, best-effort (status/audit say when it could not be located) | same |
-| **Model can save memories / learn skills** | no: `memory`, `skill_manage` vetoed | yes: saved locally by Hermes; memory blocks are still stripped from later main-chat requests |
+| **Model can save memories / learn skills** | no: `memory`, `skill_manage` vetoed | yes: saved locally by Hermes; memory blocks are still stripped from later main-chat requests when the current file can prove the snapshot; a mid-session save changes the file, the snapshot can no longer be proven, and the request fails CLOSED (blocked) rather than risk a partial strip |
 | **Past-chat search (`session_search`)** | vetoed | allowed: results from past chats go into the conversation and to the provider |
 | **Hermes chat history** | removed on close for **CLI chats (default scope)**, only after setup consent, only for chats started after consent; earlier compressed parts are kept (see *What stays*) | kept |
 | **Plaintext http:// to remote hosts** | blocked | blocked |
@@ -128,6 +128,7 @@ The plugin never claims these are gone. `/private status` repeats the list.
 | Everything an external memory provider received | A configured `memory.provider` sees every message; status warns when one is set | Remove the provider from config; its stored data is governed by that provider |
 | Past chats returned by `session_search` (wire name `chat_history_lookup` on Anthropic OAuth) | With `keep_history: true` (provider-private) the tool is allowed, and its results are part of the conversation sent to the provider | Set `keep_history: false` to veto it |
 | Max-iterations summary call, `codex_app_server` runtime, safe-mode sessions, gateway shutdown snapshots/spools, `save_trajectories`, `spawn-ledger.json` for `-q`, logs from before the plugin loaded, backups, terminal scrollback, messages on messaging platforms | Outside the plugin's hooks | Per item, manually; see `/private status` |
+| MoA advisor fan-out + aggregation | Advisors run through auxiliary calls before any middleware and the aggregator's prepared request is unenforced — private mode BLOCKS MoA aggregation requests rather than strip them; advisor calls are auxiliary (see its row above) and are not stripped. | not enforced → aggregation blocked, disclosed |
 
 ## Disclosures
 

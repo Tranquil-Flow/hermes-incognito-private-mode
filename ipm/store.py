@@ -83,7 +83,9 @@ def store_lock(data_dir: Path, blocking: bool = True):
             # open-file descriptions and are dropped when the parent closes.
             _held_locks.clear()
             _registry_pid = os.getpid()
-    token = (os.getpid(), threading.get_ident(), str(data_dir))
+    # realpath (not str()): two spellings of one directory must count as the
+    # same holder or a nested acquisition self-deadlocks (round-4 Opus F8).
+    token = (os.getpid(), threading.get_ident(), os.path.realpath(data_dir))
     with _reentrancy_lock:
         depth = _held_locks.get(token, 0)
     # NEVER hold _reentrancy_lock across the yield: the caller's body (and any
@@ -135,7 +137,7 @@ def audit_lock(data_dir: Path, blocking: bool = True):
     serialize a foreground request behind a long fence hold. Same
     reentrancy discipline as store_lock."""
     audit_dir = Path(data_dir)
-    token = (os.getpid(), threading.get_ident(), str(audit_dir) + "::audit")
+    token = (os.getpid(), threading.get_ident(), os.path.realpath(audit_dir) + "::audit")
     global _registry_pid
     with _reentrancy_lock:
         if _registry_pid != os.getpid():

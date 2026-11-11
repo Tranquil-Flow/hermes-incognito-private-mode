@@ -17,7 +17,7 @@ gaps*); 13 → 13; 14 (delegate subagents) → second half of spec 15; spec 14
 spec 25. Spec 24 (messaging fake platform) and 27 (Desktop badge) have no rows.
 Rows were not renumbered so that earlier references stay valid.
 
-**Current suite:** `pytest -q unit/ contract/` → **322 passed** (unit + contract, at HEAD 159820b; see git log)
+**Current suite:** `pytest -q unit/ contract/` → **322 passed (302 unit + 20 contract) at HEAD under review; see git log
 contract) at commit c954724. Counts quoted in rows 2/3 and in dated addenda
 below are historical snapshots, labelled as such.
 

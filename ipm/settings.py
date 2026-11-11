@@ -115,18 +115,37 @@ def read_settings(paths: CapturedPaths | None = None) -> dict[str, Any]:
         if cache_key[1] is not None and cached_key == cache_key and _config_cache["settings"] is not None:
             return dict(_config_cache["settings"])
     settings = dict(DEFAULTS)
+    read_failed = False
     try:
         from hermes_cli.config import load_config_readonly  # public allowlist
 
         config = load_config_readonly() or {}
+        # Round-#4 Opus F6: core signals broken YAML / EMFILE / EIO by
+        # RETURNING a FailedConfigRead (dict subclass, never raises). Treat it
+        # exactly like a read failure — its dict carries no plugin entry, so
+        # blindly updating from DEFAULTS would re-enable deletion against an
+        # explicit keep_history:true and loosen enforcement.
+        try:
+            from hermes_cli.config_read_errors import FailedConfigRead
+            if isinstance(config, FailedConfigRead) or getattr(config, "read_error", None):
+                read_failed = True
+                config = {}
+        except Exception:
+            if getattr(config, "read_error", None):
+                read_failed = True
+                config = {}
         settings.update(_settings_entry(config))
     except Exception as exc:  # fail closed to defaults, log content-free
         logger.debug("ipm: settings read failed (%s)", type(exc).__name__)
-        # An unreadable config must not silently WIDEN deletion: defaults carry
-        # remove_history_on_close=True, which would drop a user's explicit
-        # keep_history:true / narrowed surfaces (round-#3 lifecycle worker).
+        read_failed = True
+    if read_failed:
+        # An unreadable config must not silently WIDEN deletion or loosen
+        # enforcement: deletion-scope keys fail toward NO deletion and the
+        # privacy stance fails toward strict.
         settings["remove_history_on_close"] = False
         settings["apply_to_platforms"] = []
+        settings["allow_unverified"] = False
+        settings["strip_persona"] = True
     settings = _validated(settings)
     with _cache_lock:
         _config_cache["mtime"] = cache_key

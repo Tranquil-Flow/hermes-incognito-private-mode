@@ -69,9 +69,19 @@ def block_response_dict(api_mode: str | None, text: str) -> Any:
                         "id": f"msg_{uuid.uuid4().hex[:24]}",
                         "content": [{"type": "output_text", "text": text, "annotations": []}]}],
         }
+    if api_mode == "bedrock_converse":
+        # core's bedrock terminal returns a ChatCompletion-shaped object
+        # (normalize_converse_response), so the chat shape is the correct
+        # terminal block here (round-#4 Opus F5) — no content-free scrub path.
+        return block_response_dict("chat_completions", text)
     if api_mode == "anthropic_messages":
         return {"role": "assistant", "stop_reason": "end_turn", "usage": None,
                 "content": [{"type": "text", "text": text}]}
+    if api_mode == "bedrock_converse":
+        # core's bedrock terminal returns a ChatCompletion-shaped object
+        # (normalize_converse_response), so the chat dict shape is the correct
+        # terminal block (round-#4 Opus F5) — no content-free scrub path.
+        return block_response_dict("chat_completions", text)
     return None
 
 
