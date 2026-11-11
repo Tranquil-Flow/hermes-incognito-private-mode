@@ -81,7 +81,26 @@ Honest notes the audit raised that are NOT silently dropped:
   absent); ⚠️ unverified label correct. Second real provider with the full
   chain proven, alongside Nous.
 
-Suite: **113 passed** · validate green · commits eaf51f7/201d9b0/6991ef5.
+Suite: **113 passed** (three consecutive runs, pollution-proof) · validate green · commits eaf51f7/201d9b0/6991ef5.
+
+## Live-provider matrix (2026-11-11)
+
+| Provider | Route class | Pass-through | Memory veto intact | Label correct |
+|---|---|---|---|---|
+| Nous Portal | ok-if-flagged (flags provider-enforced) | ✅ live | ✅ live | ✅ live |
+| DeepSeek | UNVERIFIED (warn) | ✅ live | ✅ live | ✅ live |
+| OpenRouter | ok-if-flagged (PER_REQUEST flags injected) | ✅ live | ✅ live (MEMORY.md unchanged, no canary) | pinned |
+| OpenAI Codex | ok (Responses transport, store:false) | ✅ live | ✅ live (blocked message shown) | pinned |
+| Xiaomi MiMo | UNVERIFIED (warn) | ✅ live | ✅ live | ✅ live |
+| zai/GLM | ⚠️ label + synthetic block live (row 4); turn pending plan-entitled key | ⏳ account-side | ✅ unit + label live | ✅ live |
+| MiniMax | UNVERIFIED (warn) | ⏳ 402 insufficient balance (account-side, translated plainly) | ✅ MEMORY.md unchanged in the 402 run | ✅ live |
+
+Five providers with complete live chains; the two pending ones fail on
+owner-account entitlement (402/429), with the plugin's error translation and
+labels behaving correctly in those runs. Base_url lesson: OpenRouter must be
+configured WITHOUT an explicit base_url (the runtime self-resolves; an explicit
+canonical base_url drops the credential pool — `runtime_provider.py`
+`_openrouter_should_use_pool`).
 
 ## Checkpoint-1 metric (rows 1–3, 6, 7–9, 13, 16, 17)
 
