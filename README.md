@@ -203,7 +203,7 @@ global mode is `off`; `keep` also excludes the chat from cleanup.
 
 ```bash
 source ../harness/env.sh                                   # isolated HOME harness
-cd tests && env -u PYTHONPATH "$IPM_PY" -m pytest -q unit/ contract/   # 127 tests at c954724
+cd tests && env -u PYTHONPATH "$IPM_PY" -m pytest -q unit/ contract/   # 349 tests at HEAD
 hermes plugins validate <dir>                              # catalog validation
 ```
 
