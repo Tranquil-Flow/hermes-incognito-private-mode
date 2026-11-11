@@ -8,9 +8,20 @@ Private core imports allowed in test files only (§4).
 
 import inspect
 import re
+import os
 from pathlib import Path
 
-CORE = Path("/Users/evinova-self/.hermes/hermes-agent")
+_core_candidates = [
+    os.environ.get("IPM_CORE_ROOT"),                          # explicit
+    os.environ.get("IPM_REAL_HOME"),                          # exported by harness env.sh
+    str(Path.home()),                                         # normal login shell
+    "/Users/evinova-self",                                    # dev machine fallback
+]
+CORE = next(
+    (Path(c) / ".hermes" / "hermes-agent" for c in _core_candidates
+     if c and (Path(c) / ".hermes" / "hermes-agent").exists()),
+    Path.home() / ".hermes" / "hermes-agent",
+)
 PLUGIN = Path(__file__).resolve().parents[2]
 
 
