@@ -40,9 +40,13 @@ def test_render_block_format_matches_strip():
     assert '"═" * 46' in src or '═' * 46 in src
     sep = "═" * 46
     block = f"{sep}\n{MEMORY_BLOCK_HEADERS['memory']} [10%]\n{sep}\nentry-a{ENTRY_DELIMITER}entry-b"
-    from ipm.strip import strip_memory_blocks
+    from ipm.strip import strip_memory_blocks, set_memory_bodies, reset_memory_bodies
+    set_memory_bodies([f"entry-a{ENTRY_DELIMITER}entry-b"])  # production feeds bodies per call
 
-    out, n = strip_memory_blocks(f"before\n\n{block}\n\nafter")
+    try:
+        out, n = strip_memory_blocks(f"before\n\n{block}\n\nafter")
+    finally:
+        reset_memory_bodies()
     assert n == 1
     assert "entry-a" not in out and "entry-b" not in out
     assert "before" in out and "after" in out
@@ -90,7 +94,7 @@ def test_automatic_end_reasons_pinned():
 
 
 def test_allowlist_reasons_have_source_sites():
-    from ipm.lifecycle import ALLOWED_END_REASONS
+    from ipm.lifecycle import ALLOWED_END_REASONS, EXPLICIT_UNPROVEN_END_REASONS
 
     sites = {
         "cli_close": (CORE / "hermes_cli" / "cli_shutdown.py"),
@@ -101,14 +105,14 @@ def test_allowlist_reasons_have_source_sites():
         "agent_close": (CORE / "run_agent.py"),
     }
     for reason, path in sites.items():
-        assert reason in ALLOWED_END_REASONS
+        assert reason in ALLOWED_END_REASONS | EXPLICIT_UNPROVEN_END_REASONS
         assert reason in path.read_text(), f"{reason} no longer written by {path.name}"
 
 
 def test_no_unknown_explicit_end_reason_literals():
     """Every literal end reason written by core end_session sites must be either in
     our allowlist, in the automatic set, or on this reviewed ignore list."""
-    from ipm.lifecycle import ALLOWED_END_REASONS, AUTOMATIC_END_REASONS
+    from ipm.lifecycle import ALLOWED_END_REASONS, AUTOMATIC_END_REASONS, EXPLICIT_UNPROVEN_END_REASONS
 
     ignore = {"compression", "finalized", "expired", "reason", "end_reason",
               "invalidation_reason", "maintenance",
@@ -120,7 +124,7 @@ def test_no_unknown_explicit_end_reason_literals():
         literals |= set(re.findall(r"end_session\([^)]*?['\"]([a-z_]+)['\"]", py.read_text(errors="ignore")))
     for py in (CORE / "tui_gateway").glob("*.py"):
         literals |= set(re.findall(r"end_session\([^)]*?['\"]([a-z_]+)['\"]", py.read_text(errors="ignore")))
-    unknown = literals - ALLOWED_END_REASONS - AUTOMATIC_END_REASONS - ignore
+    unknown = literals - ALLOWED_END_REASONS - EXPLICIT_UNPROVEN_END_REASONS - AUTOMATIC_END_REASONS - ignore
     assert not unknown, f"new core end reasons need review: {sorted(unknown)}"
 
 

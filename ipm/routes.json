@@ -4,277 +4,759 @@
   "rows": [
     {
       "id": "local",
-      "match": {"base_url_hosts": ["localhost", "127.0.0.1", "::1", "0.0.0.0"], "provider_ids": ["lmstudio", "custom", "ollama", "local"], "auth": "any"},
+      "match": {
+        "base_url_hosts": [
+          "localhost",
+          "127.0.0.1",
+          "::1",
+          "0.0.0.0"
+        ],
+        "provider_ids": [
+          "lmstudio",
+          "custom",
+          "ollama",
+          "local"
+        ],
+        "auth": "any"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#local", "quote": "Local inference only — LM Studio and custom localhost servers"}],
+      "sources": [
+        {
+          "url": "research/registry.json#local",
+          "quote": "Local inference only — LM Studio and custom localhost servers"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "ollama-cloud",
-      "match": {"base_url_hosts": ["ollama.com"], "provider_ids": ["ollama-cloud", "ollama"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "ollama.com"
+        ],
+        "provider_ids": [
+          "ollama-cloud",
+          "ollama"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#ollama-cloud", "quote": "Ollama Cloud API key"}],
+      "sources": [
+        {
+          "url": "research/registry.json#ollama-cloud",
+          "quote": "Ollama Cloud API key"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "anthropic-api-key",
-      "match": {"base_url_hosts": ["api.anthropic.com"], "provider_ids": ["anthropic", "claude"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.anthropic.com"
+        ],
+        "provider_ids": [
+          "anthropic",
+          "claude"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#anthropic-api", "quote": "Anthropic API key (direct commercial Messages API) — commercial terms"}],
+      "sources": [
+        {
+          "url": "research/registry.json#anthropic-api",
+          "quote": "Anthropic API key (direct commercial Messages API) — commercial terms"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "anthropic-oauth",
-      "match": {"base_url_hosts": ["api.anthropic.com"], "provider_ids": ["anthropic", "claude"], "auth": "oauth"},
+      "match": {
+        "base_url_hosts": [
+          "api.anthropic.com"
+        ],
+        "provider_ids": [
+          "anthropic",
+          "claude"
+        ],
+        "auth": "oauth"
+      },
       "verdict": "ACCOUNT_SETTING",
       "account_setting": "Claude settings: turn off 'Help improve our AI models' (Pro/Max). Team plans are already covered by commercial terms; Pro/Max need the toggle. Confirmed in setup -> ok (you confirmed, not verified).",
-      "sources": [{"url": "research/registry.json#anthropic-oauth", "quote": "Claude Pro/Max consumer subscription via Claude Code-style OAuth"}],
+      "sources": [
+        {
+          "url": "research/registry.json#anthropic-oauth",
+          "quote": "Claude Pro/Max consumer subscription via Claude Code-style OAuth"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "openai-chat",
-      "match": {"base_url_hosts": ["api.openai.com"], "provider_ids": ["openai-api", "openai"], "auth": "api_key", "api_modes": ["chat_completions", "anthropic_messages"]},
+      "match": {
+        "base_url_hosts": [
+          "api.openai.com"
+        ],
+        "provider_ids": [
+          "openai-api",
+          "openai"
+        ],
+        "auth": "api_key",
+        "api_modes": [
+          "chat_completions",
+          "anthropic_messages"
+        ]
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#openai-chat", "quote": "OpenAI API key — Chat Completions"}],
+      "sources": [
+        {
+          "url": "research/registry.json#openai-chat",
+          "quote": "OpenAI API key — Chat Completions"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "openai-responses",
-      "match": {"base_url_hosts": ["api.openai.com"], "provider_ids": ["openai-api", "openai"], "auth": "api_key", "api_modes": ["codex_responses"]},
+      "match": {
+        "base_url_hosts": [
+          "api.openai.com"
+        ],
+        "provider_ids": [
+          "openai-api",
+          "openai"
+        ],
+        "auth": "api_key",
+        "api_modes": [
+          "codex_responses"
+        ]
+      },
       "verdict": "PER_REQUEST",
-      "flags": {"kind": "verify_store_false"},
-      "sources": [{"url": "research/registry.json#openai-responses", "quote": "OpenAI API key — Responses — store:false"}],
+      "flags": {
+        "kind": "verify_store_false"
+      },
+      "sources": [
+        {
+          "url": "research/registry.json#openai-responses",
+          "quote": "OpenAI API key — Responses — store:false"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "openai-codex-backend",
-      "match": {"base_url_hosts": ["chatgpt.com"], "provider_ids": ["openai-codex"], "auth": "oauth"},
+      "match": {
+        "base_url_hosts": [
+          "chatgpt.com"
+        ],
+        "provider_ids": [
+          "openai-codex"
+        ],
+        "auth": "oauth"
+      },
       "verdict": "UNVERIFIED",
-      "sources": [{"url": "research/registry.json#codex", "quote": "ChatGPT Plus/Pro subscription via Codex backend OAuth — training toggle covers Codex; retention undocumented"}],
+      "sources": [
+        {
+          "url": "research/registry.json#codex",
+          "quote": "ChatGPT Plus/Pro subscription via Codex backend OAuth — training toggle covers Codex; retention undocumented"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "openrouter",
-      "match": {"base_url_hosts": ["openrouter.ai"], "provider_ids": ["openrouter", "or"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "openrouter.ai"
+        ],
+        "provider_ids": [
+          "openrouter",
+          "or"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "PER_REQUEST",
-      "flags": {"kind": "provider_routing", "data_collection": "deny", "zdr": true},
+      "flags": {
+        "kind": "provider_routing",
+        "data_collection": "deny",
+        "zdr": true
+      },
       "account_setting": "OpenRouter privacy settings (培训 opt-outs) — confirm in setup.",
-      "sources": [{"url": "research/registry.json#openrouter", "quote": "OpenRouter API key — aggregate routing — ACCOUNT_SETTING + provider.data_collection=deny / zdr=true"}],
+      "sources": [
+        {
+          "url": "research/registry.json#openrouter",
+          "quote": "OpenRouter API key — aggregate routing — ACCOUNT_SETTING + provider.data_collection=deny / zdr=true"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "nous-portal",
-      "match": {"base_url_hosts": ["api.nousresearch.com", "inference-api.nousresearch.com", "inference.nousresearch.com"], "provider_ids": ["nous", "nous-portal", "nousresearch"], "auth": "any"},
+      "match": {
+        "base_url_hosts": [
+          "api.nousresearch.com",
+          "inference-api.nousresearch.com",
+          "inference.nousresearch.com"
+        ],
+        "provider_ids": [
+          "nous",
+          "nous-portal",
+          "nousresearch"
+        ],
+        "auth": "any"
+      },
       "verdict": "PER_REQUEST",
-      "flags": {"kind": "provider_routing", "data_collection": "deny", "zdr": true},
+      "flags": {
+        "kind": "provider_routing",
+        "data_collection": "deny",
+        "zdr": true
+      },
       "account_setting": "Nous Portal Privacy Mode — enable once in the Portal, then confirm in setup.",
-      "sources": [{"url": "research/registry.json#nous", "quote": "Nous Portal OAuth device-code / Portal subscription — ACCOUNT_SETTING + provider.zdr"}],
+      "sources": [
+        {
+          "url": "research/registry.json#nous",
+          "quote": "Nous Portal OAuth device-code / Portal subscription — ACCOUNT_SETTING + provider.zdr"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "zai-individual",
-      "match": {"base_url_hosts": ["api.z.ai"], "provider_ids": ["zai", "z.ai", "zhipu"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.z.ai"
+        ],
+        "provider_ids": [
+          "zai",
+          "z.ai",
+          "zhipu"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "UNVERIFIED",
-      "sources": [{"url": "research/registry.json#zai-individual", "quote": "Z.AI API key — individual account / DPA coverage unverified"}],
+      "sources": [
+        {
+          "url": "research/registry.json#zai-individual",
+          "quote": "Z.AI API key — individual account / DPA coverage unverified"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "zai-business",
-      "match": {"base_url_hosts": ["api.z.ai"], "provider_ids": ["zai", "z.ai"], "auth": "api_key", "models": []},
+      "match": {
+        "base_url_hosts": [
+          "api.z.ai"
+        ],
+        "provider_ids": [
+          "zai",
+          "z.ai"
+        ],
+        "auth": "api_key",
+        "models": []
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#zai-business", "quote": "Z.AI API key — business/enterprise API customer covered by incorporated DPA"}],
+      "sources": [
+        {
+          "url": "research/registry.json#zai-business",
+          "quote": "Z.AI API key — business/enterprise API customer covered by incorporated DPA"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "zhipu-cn",
-      "match": {"base_url_hosts": ["open.bigmodel.cn"], "provider_ids": ["zai", "zhipu", "zhipu-cn"], "auth": "any"},
+      "match": {
+        "base_url_hosts": [
+          "open.bigmodel.cn"
+        ],
+        "provider_ids": [
+          "zai",
+          "zhipu",
+          "zhipu-cn"
+        ],
+        "auth": "any"
+      },
       "verdict": "NONE_TRAINS",
-      "sources": [{"url": "research/registry.json#zhipu-cn", "quote": "Zhipu / GLM mainland-China ordinary API — trains with no opt-out"}],
+      "sources": [
+        {
+          "url": "research/registry.json#zhipu-cn",
+          "quote": "Zhipu / GLM mainland-China ordinary API — trains with no opt-out"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "deepseek",
-      "match": {"base_url_hosts": ["api.deepseek.com"], "provider_ids": ["deepseek"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.deepseek.com"
+        ],
+        "provider_ids": [
+          "deepseek"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "UNVERIFIED",
-      "sources": [{"url": "research/registry.json#deepseek", "quote": "DeepSeek direct API key — retention undocumented"}],
+      "sources": [
+        {
+          "url": "research/registry.json#deepseek",
+          "quote": "DeepSeek direct API key — retention undocumented"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "minimax-intl",
-      "match": {"base_url_hosts": ["api.minimax.io", "api.minimaxi.com"], "provider_ids": ["minimax", "minimax-oauth"], "auth": "any"},
+      "match": {
+        "base_url_hosts": [
+          "api.minimax.io",
+          "api.minimaxi.com"
+        ],
+        "provider_ids": [
+          "minimax",
+          "minimax-oauth"
+        ],
+        "auth": "any"
+      },
       "verdict": "UNVERIFIED",
-      "sources": [{"url": "research/registry.json#minimax", "quote": "MiniMax international API key (including M Plan) — retention undocumented"}],
+      "sources": [
+        {
+          "url": "research/registry.json#minimax",
+          "quote": "MiniMax international API key (including M Plan) — retention undocumented"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "xiaomi",
-      "match": {"base_url_hosts": [], "provider_ids": ["xiaomi", "mimo"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [],
+        "provider_ids": [
+          "xiaomi",
+          "mimo"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "NONE_RETENTION",
-      "sources": [{"url": "research/registry.json#xiaomi", "quote": "Xiaomi MiMo international API key — no training but longer retention"}],
+      "sources": [
+        {
+          "url": "research/registry.json#xiaomi",
+          "quote": "Xiaomi MiMo international API key — no training but longer retention"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "kimi-intl",
-      "match": {"base_url_hosts": ["api.moonshot.ai"], "provider_ids": ["kimi-coding", "moonshot", "kimi"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.moonshot.ai"
+        ],
+        "provider_ids": [
+          "kimi-coding",
+          "moonshot",
+          "kimi"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "NONE_TRAINS",
-      "sources": [{"url": "research/registry.json#kimi-intl", "quote": "Moonshot / Kimi Open Platform international API key — trains with no opt-out"}],
+      "sources": [
+        {
+          "url": "research/registry.json#kimi-intl",
+          "quote": "Moonshot / Kimi Open Platform international API key — trains with no opt-out"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "kimi-coding-sub",
-      "match": {"base_url_hosts": ["api.kimi.com"], "provider_ids": ["kimi-coding"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.kimi.com"
+        ],
+        "provider_ids": [
+          "kimi-coding"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "UNVERIFIED",
-      "sources": [{"url": "research/registry.json#kimi-coding", "quote": "Kimi coding subscription key (Hermes key-prefix redirect) — retention undocumented"}],
+      "sources": [
+        {
+          "url": "research/registry.json#kimi-coding",
+          "quote": "Kimi coding subscription key (Hermes key-prefix redirect) — retention undocumented"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "gemini-api",
-      "match": {"base_url_hosts": ["generativelanguage.googleapis.com"], "provider_ids": ["gemini", "google"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "generativelanguage.googleapis.com"
+        ],
+        "provider_ids": [
+          "gemini",
+          "google"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "NONE_TRAINS",
-      "sources": [{"url": "research/registry.json#gemini-free", "quote": "Google Gemini API key — unpaid quota outside EEA/Switzerland/UK trains; paid quota is NONE_RETENTION (55 days); worst of the two rows until you confirm paid"}],
+      "sources": [
+        {
+          "url": "research/registry.json#gemini-free",
+          "quote": "Google Gemini API key — unpaid quota outside EEA/Switzerland/UK trains; paid quota is NONE_RETENTION (55 days); worst of the two rows until you confirm paid"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "gemini-paid",
-      "match": {"base_url_hosts": ["generativelanguage.googleapis.com"], "provider_ids": ["gemini", "google"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "generativelanguage.googleapis.com"
+        ],
+        "provider_ids": [
+          "gemini",
+          "google"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "NONE_RETENTION",
       "account_setting": "Paid Gemini (active Cloud Billing project): no training, 55-day retention.",
-      "sources": [{"url": "research/registry.json#gemini-paid", "quote": "Google Gemini API key — paid service / active Cloud Billing project"}],
+      "sources": [
+        {
+          "url": "research/registry.json#gemini-paid",
+          "quote": "Google Gemini API key — paid service / active Cloud Billing project"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "xai-api-key",
-      "match": {"base_url_hosts": ["api.x.ai"], "provider_ids": ["xai", "grok", "x-ai"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.x.ai"
+        ],
+        "provider_ids": [
+          "xai",
+          "grok",
+          "x-ai"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#xai", "quote": "xAI API key — Responses API (Hermes default)"}],
+      "sources": [
+        {
+          "url": "research/registry.json#xai",
+          "quote": "xAI API key — Responses API (Hermes default)"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "copilot",
-      "match": {"base_url_hosts": ["api.githubcopilot.com", "api.business.githubcopilot.com"], "provider_ids": ["copilot", "copilot-acp"], "auth": "oauth"},
+      "match": {
+        "base_url_hosts": [
+          "api.githubcopilot.com",
+          "api.business.githubcopilot.com"
+        ],
+        "provider_ids": [
+          "copilot",
+          "copilot-acp"
+        ],
+        "auth": "oauth"
+      },
       "verdict": "NONE_RETENTION",
-      "sources": [{"url": "research/registry.json#copilot", "quote": "GitHub Copilot Business/Enterprise — no training but 28-day non-IDE retention; individual is UNVERIFIED"}],
+      "sources": [
+        {
+          "url": "research/registry.json#copilot",
+          "quote": "GitHub Copilot Business/Enterprise — no training but 28-day non-IDE retention; individual is UNVERIFIED"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "mistral-free",
-      "match": {"base_url_hosts": ["api.mistral.ai"], "provider_ids": ["mistral", "custom"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.mistral.ai"
+        ],
+        "provider_ids": [
+          "mistral",
+          "custom"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "NONE_TRAINS",
-      "sources": [{"url": "research/registry.json#mistral-free", "quote": "Mistral Studio Labs / Preview models — train with no opt-out; paid tier is ORG_AGREEMENT"}],
+      "sources": [
+        {
+          "url": "research/registry.json#mistral-free",
+          "quote": "Mistral Studio Labs / Preview models — train with no opt-out; paid tier is ORG_AGREEMENT"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "qwen-oauth",
-      "match": {"base_url_hosts": [], "provider_ids": ["qwen-oauth"], "auth": "oauth"},
+      "match": {
+        "base_url_hosts": [],
+        "provider_ids": [
+          "qwen-oauth"
+        ],
+        "auth": "oauth"
+      },
       "verdict": "NONE_TRAINS",
-      "sources": [{"url": "research/registry.json#qwen-oauth", "quote": "Qwen Portal OAuth (not DashScope API key) — trains with no opt-out"}],
+      "sources": [
+        {
+          "url": "research/registry.json#qwen-oauth",
+          "quote": "Qwen Portal OAuth (not DashScope API key) — trains with no opt-out"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "fireworks",
-      "match": {"base_url_hosts": ["api.fireworks.ai"], "provider_ids": ["fireworks"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.fireworks.ai"
+        ],
+        "provider_ids": [
+          "fireworks"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#fireworks", "quote": "Fireworks open-model API key — bundled Chat Completions route"}],
+      "sources": [
+        {
+          "url": "research/registry.json#fireworks",
+          "quote": "Fireworks open-model API key — bundled Chat Completions route"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "deepinfra",
-      "match": {"base_url_hosts": ["api.deepinfra.com"], "provider_ids": ["deepinfra"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.deepinfra.com"
+        ],
+        "provider_ids": [
+          "deepinfra"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#deepinfra", "quote": "DeepInfra open-weight real-time inference API key"}],
+      "sources": [
+        {
+          "url": "research/registry.json#deepinfra",
+          "quote": "DeepInfra open-weight real-time inference API key"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "novita",
-      "match": {"base_url_hosts": ["api.novita.ai"], "provider_ids": ["novita"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.novita.ai"
+        ],
+        "provider_ids": [
+          "novita"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#novita", "quote": "Novita open-weight inference API key"}],
+      "sources": [
+        {
+          "url": "research/registry.json#novita",
+          "quote": "Novita open-weight inference API key"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "vercel-ai-gateway",
-      "match": {"base_url_hosts": [], "provider_ids": ["ai-gateway", "vercel", "vercel-ai-gateway"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [],
+        "provider_ids": [
+          "ai-gateway",
+          "vercel",
+          "vercel-ai-gateway"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "PER_REQUEST",
-      "flags": {"kind": "p1_unimplemented", "p1": true},
+      "flags": {
+        "kind": "p1_unimplemented",
+        "p1": true
+      },
       "account_setting": "Vercel ZDR requires Pro/Enterprise and the per-request option; wire shape unverified — P1.",
-      "sources": [{"url": "research/registry.json#vercel", "quote": "Vercel AI Gateway API key — Pro/Enterprise, eligible inference routes"}],
+      "sources": [
+        {
+          "url": "research/registry.json#vercel",
+          "quote": "Vercel AI Gateway API key — Pro/Enterprise, eligible inference routes"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "commandcode",
-      "match": {"base_url_hosts": [], "provider_ids": ["commandcode", "commandcode-chat"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [],
+        "provider_ids": [
+          "commandcode",
+          "commandcode-chat"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "PER_REQUEST",
-      "flags": {"kind": "p1_unimplemented", "p1": true},
+      "flags": {
+        "kind": "p1_unimplemented",
+        "p1": true
+      },
       "account_setting": "CommandCode x-cmd-zdr: 1 header — P1.",
-      "sources": [{"url": "research/registry.json#commandcode", "quote": "CommandCode Provider API key — x-cmd-zdr header; strict 422 when no providers"}],
+      "sources": [
+        {
+          "url": "research/registry.json#commandcode",
+          "quote": "CommandCode Provider API key — x-cmd-zdr header; strict 422 when no providers"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "nebius",
-      "match": {"base_url_hosts": [], "provider_ids": ["nebius-token-factory", "nebius"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.tokenfactory.nebius.com"
+        ],
+        "provider_ids": [
+          "nebius-token-factory",
+          "nebius"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ACCOUNT_SETTING",
       "account_setting": "Nebius org ZDR — confirm in setup.",
-      "sources": [{"url": "research/registry.json#nebius", "quote": "Nebius Token Factory API key — org ZDR"}],
+      "sources": [
+        {
+          "url": "research/registry.json#nebius",
+          "quote": "Nebius Token Factory API key — org ZDR"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "huggingface",
-      "match": {"base_url_hosts": ["router.huggingface.co"], "provider_ids": ["huggingface", "hf"], "auth": "any"},
+      "match": {
+        "base_url_hosts": [
+          "router.huggingface.co"
+        ],
+        "provider_ids": [
+          "huggingface",
+          "hf"
+        ],
+        "auth": "any"
+      },
       "verdict": "UNVERIFIED",
-      "sources": [{"url": "research/registry.json#hf", "quote": "Hugging Face Inference Providers access token — router"}],
+      "sources": [
+        {
+          "url": "research/registry.json#hf",
+          "quote": "Hugging Face Inference Providers access token — router"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "kilocode",
-      "match": {"base_url_hosts": [], "provider_ids": ["kilocode", "kilo-code"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [],
+        "provider_ids": [
+          "kilocode",
+          "kilo-code"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "UNVERIFIED",
-      "sources": [{"url": "research/registry.json#kilocode", "quote": "Kilo Code gateway API key"}],
+      "sources": [
+        {
+          "url": "research/registry.json#kilocode",
+          "quote": "Kilo Code gateway API key"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "venice-private",
-      "match": {"base_url_hosts": ["api.venice.ai"], "provider_ids": ["custom", "venice"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [
+          "api.venice.ai"
+        ],
+        "provider_ids": [
+          "custom",
+          "venice"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#venice", "quote": "Venice API key — model_spec.privacy=private"}],
+      "sources": [
+        {
+          "url": "research/registry.json#venice",
+          "quote": "Venice API key — model_spec.privacy=private"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     },
     {
       "id": "opencode-zen",
-      "match": {"base_url_hosts": [], "provider_ids": ["opencode-zen", "opencode"], "auth": "api_key"},
+      "match": {
+        "base_url_hosts": [],
+        "provider_ids": [
+          "opencode-zen",
+          "opencode"
+        ],
+        "auth": "api_key"
+      },
       "verdict": "ALREADY",
-      "sources": [{"url": "research/registry.json#opencode-zen", "quote": "OpenCode Zen API key — models outside published privacy exceptions"}],
+      "sources": [
+        {
+          "url": "research/registry.json#opencode-zen",
+          "quote": "OpenCode Zen API key — models outside published privacy exceptions"
+        }
+      ],
       "verified": true,
       "policy_rev": "2026-11-10-r1"
     }
