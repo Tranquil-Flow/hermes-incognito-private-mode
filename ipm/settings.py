@@ -33,6 +33,13 @@ DEFAULTS: dict[str, Any] = {
     "save_memory": False,
     "learn_skills": False,
     "allow_unverified": True,
+    # Block http:// requests to non-loopback hosts (cleartext egress).
+    "allow_plaintext_remote": False,
+    # Best-effort removal of the user's SOUL.md persona from the system prompt
+    # (honest: when the exact text cannot be located, status says so).
+    "strip_persona": False,
+    # Content-free outbound metadata log (endpoint/verdict/actions), local 0600.
+    "audit_log": True,
     "block_training": True,
     "deep_clean_reminder": "weekly",
 }

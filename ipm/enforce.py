@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import logging
 import time
+import json
+import os
+from urllib.parse import urlsplit
 from typing import Any
 
 from . import routes as routes_mod
@@ -145,6 +148,58 @@ def _memory_strip_active(settings: dict[str, Any], entry: dict[str, Any] | None)
     return not settings.get("use_memory", False)
 
 
+_AUDIT_MAX_BYTES = 512 * 1024
+
+
+def _audit_append(paths: Any, record: dict[str, Any]) -> None:
+    """Content-free outbound metadata (§2.5 discipline): endpoint/verdict/actions.
+    JSONL at 0600; capped by keeping the newest half when it grows past 512KB."""
+    try:
+        path = paths.data_dir / "audit.jsonl"
+        record = {"ts": round(time.time(), 3), **record}
+        line = json.dumps(record, ensure_ascii=False)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(line + "\n")
+            os.chmod(path, 0o600)
+            return
+        if path.stat().st_size > _AUDIT_MAX_BYTES:
+            lines = path.read_text().splitlines()
+            path.write_text("\n".join(lines[len(lines) // 2:]) + "\n")
+        with open(path, "a") as fh:
+            fh.write(line + "\n")
+    except Exception as exc:  # audit must never break the request path
+        logger.debug("ipm: audit append failed (%s)", type(exc).__name__)
+
+
+def _persona_text(paths: Any) -> str | None:
+    """The user's SOUL.md content as the loader normalizes it (stripped)."""
+    try:
+        soul = paths.home / "SOUL.md"
+        if not soul.exists():
+            return None
+        text = (soul.read_text() or "").strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def _plaintext_block_reason(kwargs: dict[str, Any], settings: dict[str, Any]) -> str | None:
+    """Non-loopback http:// is cleartext egress: block unless explicitly allowed."""
+    if settings.get("allow_plaintext_remote", False):
+        return None
+    base_url = kwargs.get("base_url")
+    if not isinstance(base_url, str) or "://" not in base_url:
+        return None
+    parts = urlsplit(base_url)
+    if parts.scheme != "http":
+        return None
+    host = (parts.hostname or "").lower()
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return None
+    return "plaintext http to a remote host would leak content in the clear"
+
+
 def on_llm_request(**kwargs: Any):
     """``llm_request`` middleware. Returns {"request": new} or None."""
     try:
@@ -185,6 +240,13 @@ def on_llm_request(**kwargs: Any):
                 trace["applied"].append(
                     f"stripped memory blocks={counts['blocks']} spans={counts['spans']}")
 
+        if settings.get("strip_persona", False):
+            persona = _persona_text(paths)
+            if persona:
+                new_request, n = strip_mod.replace_persona_span(new_request, persona)
+                if n:
+                    trace["applied"].append(f"stripped persona spans={n}")
+
         if new_request is not request:
             return {"request": new_request, "source": trace["source"],
                     "reason": trace.get("reason") or "private mode flags/strip"}
@@ -224,7 +286,10 @@ def on_llm_execution(**kwargs: Any):
             confirmations = _confirmations(paths.data_dir)
             verdict = _classify(request, kwargs, settings, confirmations, "execution")
 
-            if verdict.label == "block" and settings.get("block_training", True):
+            plaintext_reason = _plaintext_block_reason(kwargs, settings)
+            if plaintext_reason:
+                block_message = _block_message(verdict, plaintext_reason)
+            elif verdict.label == "block" and settings.get("block_training", True):
                 block_message = _block_message(verdict, "; ".join(verdict.reasons) or "route trains with no opt-out")
             elif verdict.label in {"warn", "needs-confirmation"} and not settings.get("allow_unverified", True):
                 block_message = _block_message(verdict, "; ".join(verdict.reasons) or "route not verified for privacy")
@@ -243,6 +308,30 @@ def on_llm_execution(**kwargs: Any):
             if block_message is None and _memory_strip_active(settings, entry):
                 if transforms.memory_markers_present(payload) or _strip_ambiguous(payload):
                     block_message = _block_message(verdict, "memory content still present in request")
+
+            persona_state = None
+            if settings.get("strip_persona", False) and block_message is None:
+                persona = _persona_text(paths)
+                if persona:
+                    payload, n = strip_mod.replace_persona_span(payload, persona)
+                    persona_state = "stripped" if n else "present-not-located"
+                else:
+                    persona_state = "absent"
+            elif settings.get("strip_persona", False):
+                persona_state = "absent"
+
+            if settings.get("audit_log", True):
+                from urllib.parse import urlsplit as _us
+                _parts = _us(str(kwargs.get("base_url") or ""))
+                _audit_append(paths, {
+                    "provider": kwargs.get("provider"),
+                    "host": _parts.hostname or "",
+                    "scheme": _parts.scheme or "",
+                    "label": verdict.label,
+                    "policy": verdict.policy,
+                    "blocked": block_message is not None,
+                    "persona": persona_state,
+                })
     except Exception:
         # Internal failure -> fail closed when this transport supports a
         # synthetic block; otherwise pass the llm_request copy through (the

@@ -49,7 +49,19 @@ config_schema:
   allow_unverified:
     type: bool
     default: true
-    description: "Allow requests on routes whose retention is unverified (labelled with a warning)."
+    description: "Allow requests on routes whose retention is unverified (labelled with a warning). Set false for strict mode: unverified routes are blocked."
+  allow_plaintext_remote:
+    type: bool
+    default: false
+    description: "Allow http:// requests to non-loopback hosts. Keep false: cleartext egress leaks content in transit."
+  strip_persona:
+    type: bool
+    default: false
+    description: "Best-effort removal of your SOUL.md persona text from outgoing system prompts. When the exact text cannot be located, status reports it honestly instead of claiming protection."
+  audit_log:
+    type: bool
+    default: true
+    description: "Keep a local, content-free log of outbound requests (endpoint, verdict, actions) at plugin-data/audit.jsonl — visible via /private status."
   block_training:
     type: bool
     default: true

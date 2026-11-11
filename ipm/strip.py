@@ -385,3 +385,63 @@ def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             ensure_copy()["system"] = new_system
 
     return new_request, counts
+
+
+_PERSONA_PLACEHOLDER = "[persona omitted: private mode]"
+
+
+def replace_persona_span(request: dict[str, Any], persona_text: str) -> tuple[dict[str, Any], int]:
+    """Best-effort removal of the user's SOUL.md persona from the request.
+
+    Exact-substring replacement only: the persona text as the loader renders it
+    (stripped) is located verbatim in system/developer surfaces and replaced
+    with a placeholder. When the exact text cannot be found (post-processing by
+    the loader, truncation), the request is returned UNCHANGED and the caller
+    must disclose 'persona present, not stripped' — never claim protection.
+    Returns (request, replaced_count); mutates via copy-on-write.
+    """
+    needle = (persona_text or "").strip()
+    if not needle or len(needle) < 32:
+        return request, 0
+    new_request = request
+    replaced = 0
+
+    def sub(text: str) -> str:
+        nonlocal replaced
+        if needle in text:
+            replaced += text.count(needle)
+            return text.replace(needle, _PERSONA_PLACEHOLDER)
+        return text
+
+    def ensure_copy() -> dict[str, Any]:
+        nonlocal new_request
+        if new_request is request:
+            new_request = dict(request)
+        return new_request
+
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        for i, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
+            if i == 0 and msg.get("role") in ("system", "developer") and isinstance(msg.get("content"), str):
+                text2 = sub(msg["content"])
+                if text2 != msg["content"]:
+                    ensure_copy()["messages"] = [
+                        {**msg, "content": text2} if j == i else m for j, m in enumerate(messages)]
+    system = request.get("system")
+    if isinstance(system, str):
+        text2 = sub(system)
+        if text2 != system:
+            ensure_copy()["system"] = text2
+    elif isinstance(system, list):
+        new_system: list[Any] | None = None
+        for i, part in enumerate(system):
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                text2 = sub(part["text"])
+                if text2 != part["text"]:
+                    new_system = list(system) if new_system is None else new_system
+                    new_system[i] = {**part, "text": text2}
+        if new_system is not None:
+            ensure_copy()["system"] = new_system
+    return new_request, replaced

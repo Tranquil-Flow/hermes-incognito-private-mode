@@ -31,6 +31,48 @@ BLOCKED_TOOL_NAMES = {"memory", "skill_manage", "session_search"}
 
 # --- status ------------------------------------------------------------------
 
+
+def _audit_summary(paths: Any) -> str | None:
+    """One-line summary of the last hour of content-free outbound audit records."""
+    import json
+    try:
+        path = paths.data_dir / "audit.jsonl"
+        if not path.exists():
+            return None
+        now = time.time()
+        recent = []
+        with open(path) as fh:
+            for raw in fh.readlines()[-400:]:
+                try:
+                    rec = json.loads(raw)
+                except Exception:
+                    continue
+                if now - float(rec.get("ts", 0)) <= 3600:
+                    recent.append(rec)
+        if not recent:
+            return None
+        blocked = sum(1 for rec in recent if rec.get("blocked"))
+        labels: dict[str, int] = {}
+        hosts: dict[str, int] = {}
+        persona = 0
+        for rec in recent:
+            labels[str(rec.get("label", "?"))] = labels.get(str(rec.get("label", "?")), 0) + 1
+            host = str(rec.get("host", "?"))
+            hosts[host] = hosts.get(host, 0) + 1
+            if rec.get("persona") == "stripped":
+                persona += 1
+        label_txt = ", ".join(f"{k}×{v}" for k, v in sorted(labels.items()))
+        host_txt = ", ".join(sorted(h for h in hosts if h)[:3]) or "?"
+        bits = [f"{len(recent)} call{'s' if len(recent) != 1 else ''} ({label_txt}; {blocked} blocked)",
+                f"hosts: {host_txt}"]
+        if any(rec.get("persona") == "present-not-located" for rec in recent):
+            bits.append("⚠ persona present but not stripped")
+        elif persona:
+            bits.append(f"persona stripped ×{persona}")
+        return "; ".join(bits)
+    except Exception:
+        return None
+
 def status_text(paths=None) -> str:
     paths = paths or capture_paths()
     settings = read_settings(paths)
@@ -64,6 +106,10 @@ def status_text(paths=None) -> str:
     reminder = settings.get("deep_clean_reminder", "weekly")
     if reminder != "off":
         lines.append(f"Deep-clean reminder: {reminder} — deleted bytes remain in free DB pages until a deep clean.")
+    if settings.get("audit_log", True):
+        audit = _audit_summary(paths)
+        if audit:
+            lines.append(f"Outbound audit (last hour): {audit}")
     lines.append("")
     lines.append("What stays (never removed by this plugin): final replies kept for retries (by Hermes design),")
     lines.append("CLI input history (~/.hermes/.hermes_history), paste files, interrupt_debug.log, deleted bytes in")
