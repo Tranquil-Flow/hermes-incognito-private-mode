@@ -171,7 +171,22 @@ def strip_memory_blocks_checked(text: str, bodies: list[str] | None = None) -> t
             if end <= len(text) and (end == len(text) or text[end] == "\n"):
                 body_slice = text[body_start:end]
                 if body_slice in (bodies if bodies is not None else _memory_bodies):
-                    body_end = end
+                    # Continuation check (round-#5 Astra F2): a proven slice
+                    # followed by "\n<non-blank text>" means the framed body
+                    # CONTINUES beyond the advertised length. Honest core
+                    # renders follow with a blank line, so a single-newline
+                    # continuation is either a forged mismatched-length
+                    # header or an unprovable layout - stay INTACT and flag
+                    # ambiguous (never a partial strip). Attacker-authored
+                    # tails carry no user memory, but blocking is the honest
+                    # default and cannot distinguish them from a real block
+                    # tail at the text level.
+                    rest = text[end:]
+                    nxt = rest[1:2]
+                    if rest and rest.startswith("\n") and nxt and nxt != "\n" and nxt.strip():
+                        ambiguous = True
+                    else:
+                        body_end = end
         # SECONDARY: exact reconstruction from fed bodies (cleaned + raw).
         # Candidates are FULL blocks (header+body), so they anchor at the
         # header start, not the body start. Round-#4 Astra F1: when the title
@@ -321,6 +336,24 @@ def is_system_message(msg: Any, index: int) -> bool:
     return index == 0 and isinstance(msg, dict) and msg.get("role") in ("system", "developer")
 
 
+
+def _last_user_message_idx(messages: list[Any]) -> int:
+    """Index of the LAST user message in the messages list, or -1."""
+    idx = -1
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get("role") == "user":
+            idx = i
+    return idx
+
+
+def _last_input_user_idx(inp: list[Any]) -> int:
+    """Index of the LAST user item in a codex input list, or -1."""
+    idx = -1
+    for i, it in enumerate(inp):
+        if isinstance(it, dict) and it.get("role") == "user":
+            idx = i
+    return idx
+
 def strip_request(request: dict[str, Any], bodies: list[str] | None = None) -> tuple[dict[str, Any], dict[str, int]]:
     """Strip a full request (chat_completions / codex_responses / anthropic_messages
     shapes). Copy-on-write: returns the ORIGINAL object when nothing was removed.
@@ -362,10 +395,14 @@ def strip_request(request: dict[str, Any], bodies: list[str] | None = None) -> t
                     if text2 != text:
                         changed = True
                     continue
-                # user message: strip well-ordered spans; fail closed on residue
+                # user message: strip well-ordered spans; fail closed on
+                # residue — but only flag the LAST user turn (round-#5 Opus:
+                # an unpaired <memory-context> tag in an OLD quoted turn must
+                # not wedge the session into a permanent block)
                 text3, s = strip_memory_context_spans(text2 if isinstance(text2, str) else text)
                 counts["spans"] += s
-                if isinstance(text3, str) and span_residue(text3):
+                if (isinstance(text3, str) and span_residue(text3)
+                        and i == _last_user_message_idx(messages)):
                     counts["ambiguous"] += 1
                 new_texts.append(text3)
                 if text3 != (text2 if isinstance(text2, str) else text):
@@ -406,7 +443,8 @@ def strip_request(request: dict[str, Any], bodies: list[str] | None = None) -> t
             for text in texts:
                 text2, s = strip_memory_context_spans(text)
                 counts["spans"] += s
-                if isinstance(text2, str) and span_residue(text2):
+                if (isinstance(text2, str) and span_residue(text2)
+                        and i == _last_input_user_idx(inp)):
                     counts["ambiguous"] += 1
                 span_texts.append(text2)
                 if text2 != text:

@@ -64,6 +64,22 @@ _registry_pid = os.getpid()
 _held_locks: dict[tuple[int, int, str], int] = {}
 
 
+def try_acquire(data_dir):
+    """Single-shot non-blocking store-lock acquisition (test/introspection
+    aid): returns a release callable or None when the lock is busy."""
+    fd = os.open(str(_lock_path(data_dir)), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return None
+        return lambda: (fcntl.flock(fd, fcntl.LOCK_UN), os.close(fd))
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 @contextmanager
 def store_lock(data_dir: Path, blocking: bool = True):
     """Cross-process RMW lock keyed by the captured data dir (profile-safe, §2.6).

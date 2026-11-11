@@ -46,42 +46,44 @@ def block_response(api_mode: str | None, text: str) -> Any:
 
 
 def block_response_dict(api_mode: str | None, text: str) -> Any:
-    """SDK-independent dict fallback for the three known modes. A plain dict is
-    serializable by every OpenAI/Anthropic transport, so an internal-error
-    block can be delivered even when SDK construction fails (round-#3 Astra
-    F5: shaping failure must never fall through to the provider)."""
+    """SDK-independent fallback for the known modes. Shapes are what CORE'S
+    transport validators accept (round-#5 Opus: a plain dict is rejected by
+    validate_response and only triggers core's invalid-response fallback, so
+    the user never sees the block): bedrock gets a raw Converse dict,
+    everything else attribute-access objects mirroring the SDK shapes. Still
+    fail-closed either way — next_call never runs."""
+    from types import SimpleNamespace
     if not text:
         text = "Blocked by private mode."
     if api_mode == "chat_completions":
-        return {
-            "id": f"ipm-{uuid.uuid4().hex[:24]}", "object": "chat.completion",
-            "created": int(time.time()), "model": "private-mode-block",
-            "choices": [{"index": 0, "finish_reason": "stop",
-                         "message": {"role": "assistant", "content": text}}],
-        }
+        return SimpleNamespace(
+            id=f"ipm-{uuid.uuid4().hex[:24]}", object="chat.completion",
+            created=int(time.time()), model="private-mode-block", service_tier=None,
+            system_fingerprint=None, usage=None,
+            choices=[SimpleNamespace(index=0, finish_reason="stop", logprobs=None,
+                                     message=SimpleNamespace(role="assistant", content=text,
+                                                             refusal=None, annotations=None))])
     if api_mode == "codex_responses":
-        return {
-            "id": f"resp_{uuid.uuid4().hex[:24]}", "object": "response",
-            "created_at": time.time(), "model": "private-mode-block",
-            "status": "completed", "parallel_tool_calls": False,
-            "tool_choice": "none", "tools": [],
-            "output": [{"type": "message", "role": "assistant", "status": "completed",
-                        "id": f"msg_{uuid.uuid4().hex[:24]}",
-                        "content": [{"type": "output_text", "text": text, "annotations": []}]}],
-        }
+        return SimpleNamespace(
+            id=f"resp_{uuid.uuid4().hex[:24]}", object="response",
+            created_at=time.time(), model="private-mode-block",
+            status="completed", parallel_tool_calls=False,
+            tool_choice="none", tools=[],
+            output=[SimpleNamespace(type="message", role="assistant", status="completed",
+                                    id=f"msg_{uuid.uuid4().hex[:24]}",
+                                    content=[SimpleNamespace(type="output_text", text=text,
+                                                             annotations=[])])])
     if api_mode == "bedrock_converse":
-        # core's bedrock terminal returns a ChatCompletion-shaped object
-        # (normalize_converse_response), so the chat shape is the correct
-        # terminal block here (round-#4 Opus F5) — no content-free scrub path.
-        return block_response_dict("chat_completions", text)
+        # raw Converse dict: BedrockTransport.validate_response requires the
+        # 'output' key and normalize_response reads it (round-#5 Opus).
+        return {"output": {"message": {"role": "assistant",
+                                       "content": [{"text": text}]}},
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}}
     if api_mode == "anthropic_messages":
-        return {"role": "assistant", "stop_reason": "end_turn", "usage": None,
-                "content": [{"type": "text", "text": text}]}
-    if api_mode == "bedrock_converse":
-        # core's bedrock terminal returns a ChatCompletion-shaped object
-        # (normalize_converse_response), so the chat dict shape is the correct
-        # terminal block (round-#4 Opus F5) — no content-free scrub path.
-        return block_response_dict("chat_completions", text)
+        return SimpleNamespace(
+            role="assistant", stop_reason="end_turn", usage=None,
+            content=[SimpleNamespace(type="text", text=text)])
     return None
 
 

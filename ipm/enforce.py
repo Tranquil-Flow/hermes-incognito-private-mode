@@ -91,8 +91,12 @@ def _memory_bodies(paths) -> list[str]:
     cached_sig, cached_bodies = _memory_bodies_cache
     if cached_sig == key:
         return cached_bodies
+    bucket_key = "|".join(s[0] for s in sig)  # THIS profile's memory/profile paths
     bodies: list[str] = []
-    for idx, text in enumerate(texts):
+    # file label travels WITH its text (round-#5 Opus: when MEMORY.md is
+    # unreadable, USER.md must not inherit MEMORY.md's placeholder name)
+    labeled = [(("memory", "user")[i] if i < 2 else str(i), t) for i, t in enumerate(texts)]
+    for idx, (file_label, text) in enumerate(labeled):
         segments = text.split("\n§\n")
         entries = [e.strip() for e in segments]
         entries = [e for e in entries if e]
@@ -110,13 +114,12 @@ def _memory_bodies(paths) -> list[str]:
         # (load_from_disk -> _sanitize), so an unchanged file whose snapshot
         # was redacted can never match cleaned/raw. Add the redacted join as
         # a candidate, using core's own transform when importable.
-        redacted = _core_redacted_join(entries, idx, paths)
+        redacted = _core_redacted_join(entries, 0 if file_label == "memory" else 1, paths)
         if redacted and redacted not in bodies:
             bodies.append(redacted)
     _memory_bodies_cache = (key, bodies)
-    hist_key = "|".join(s[0] for s in sig) if sig else "none"
     with _history_lock:
-        hist = _memory_bodies_history.setdefault(hist_key, [])
+        hist = _memory_bodies_history.setdefault(bucket_key, [])
         if not hist or hist[-1][0] != key:
             hist.append((key, bodies))
             del hist[:-_MEMORY_HISTORY_LIMIT]
@@ -124,16 +127,23 @@ def _memory_bodies(paths) -> list[str]:
 
 
 def _memory_bodies_all(paths) -> list[str]:
-    """Current candidates plus the bounded history of past versions, current
-    first. Strip reconstruction matches ANY version the session observed."""
+    """Current candidates plus the bounded history of THIS profile's past
+    versions, current first (round-#5 Astra F2: history buckets are keyed by
+    the profile's memory/profile paths and are NEVER merged across profiles —
+    another profile's observed body must not lend provenance here)."""
     current = _memory_bodies(paths)
+    sig_paths = []
+    for attr in ("memory_path", "user_profile_path"):
+        p_ = getattr(paths, attr, None)
+        if p_ is not None:
+            sig_paths.append(str(p_))
+    bucket_key = "|".join(sig_paths)
     out: list[str] = list(current)
     with _history_lock:
-        for key, sig_list in _memory_bodies_history.items():
-            for _sig, bodies in sig_list:
-                for b in bodies:
-                    if b not in out:
-                        out.append(b)
+        for _sig, bodies in _memory_bodies_history.get(bucket_key, []):
+            for b in bodies:
+                if b not in out:
+                    out.append(b)
     return out
 
 
@@ -613,8 +623,14 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
                             return True
         inp = payload.get("input")
         if isinstance(inp, list):
-            for item in inp:
-                if isinstance(item, dict) and item.get("role") == "user":
+            # same last-user-turn rule as messages (round-#5 Opus: a QUOTED
+            # memory title in an older codex input turn must not wedge the
+            # session; live memory in the current turn still blocks)
+            user_idxs = [i for i, it in enumerate(inp)
+                         if isinstance(it, dict) and it.get("role") == "user"]
+            last_inp_user = user_idxs[-1] if user_idxs else -1
+            for i, item in enumerate(inp):
+                if isinstance(item, dict) and item.get("role") == "user" and i == last_inp_user:
                     for text in strip_mod.content_texts(item.get("content")):
                         if _text_residue(text):
                             return True

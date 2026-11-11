@@ -147,6 +147,12 @@ def read_settings(paths: CapturedPaths | None = None) -> dict[str, Any]:
         settings["allow_unverified"] = False
         settings["strip_persona"] = True
     settings = _validated(settings)
+    if read_failed:
+        # round-#5 Opus: a TRANSIENT read failure (EMFILE/EIO -> FailedConfigRead)
+        # must never enter the cache, or one bad read permanently pins the
+        # fail-safe settings (and sweeps exclude armed chats) until config.yaml
+        # is edited. Cache only successful reads; failures re-probe next call.
+        return settings
     with _cache_lock:
         _config_cache["mtime"] = cache_key
         _config_cache["settings"] = dict(settings)

@@ -102,9 +102,17 @@ def read_row_checked(db_path: Path, session_id: str) -> tuple[str, dict[str, Any
     try:
         conn = _ro_connect(db_path)
         try:
-            row = conn.execute(
-                "SELECT id, started_at, ended_at, end_reason, source, parent_session_id "
-                "FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            try:
+                row = conn.execute(
+                    "SELECT id, started_at, ended_at, end_reason, source, parent_session_id, "
+                    "archived FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            except sqlite3.OperationalError:
+                # pre-archived schema (or a minimal table): archived reads as None
+                row = conn.execute(
+                    "SELECT id, started_at, ended_at, end_reason, source, parent_session_id "
+                    "FROM sessions WHERE id = ?", (session_id,)).fetchone()
+                if row is not None:
+                    row = dict(row) | {"archived": None}
         finally:
             conn.close()
     except (sqlite3.Error, OSError, ValueError):
@@ -805,6 +813,11 @@ def _fence_admission(ledger: dict[str, Any], key: str, targets: list[str], setti
         t_state, t_row = read_row_checked(paths.db_path, target)
         if t_state != "present" or t_row is None or not row_is_closed(t_row):
             return "lineage member not closed by an admitted path", False
+        # Archived rows are user-protected (round-#5 Opus: the non-blocking
+        # on_session_delete hint can be dropped under contention, so admission
+        # must read the archived flag DIRECTLY and never depend on the hint).
+        if t_row.get("archived"):
+            return "lineage member archived by the user", True
     return None, False
 
 
@@ -867,31 +880,53 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
                 l[store.hash_session_id(target)]["deleting"] = True
             return l  # mutate persists the dict it returns — flags must survive
 
+        # Transcript fence (round-#4 Opus F7, hardened round-#5 Astra F1):
+        # capture each target's display snapshot and closed-state BEFORE
+        # admission. Core re-checks the snapshot inside its own write
+        # transaction, so a /resume plus a new message landing anywhere before
+        # the delete aborts the deletion instead of deleting a chat the user
+        # just reopened. Capturing OUTSIDE the lock also keeps the expensive
+        # export off the shared-store critical path.
+        expected_display: dict[str, list[dict[str, Any]]] = {}
+        # EVERY target's transcript is fenced (round-#5 Opus HIGH: the old
+        # root-only capture left delegate children and lineage segments
+        # unfenced — a message written into a child after admission was
+        # deleted). Core re-checks each id's snapshot inside its own write
+        # transaction.
+        try:
+            for t in targets:
+                raw = db.export_session(t, include_compacted=True)
+                if not raw:
+                    raise ValueError(f"no transcript for a delete target")
+                for seg in (raw.get("segments") or [raw]):
+                    if seg.get("id"):
+                        expected_display[seg["id"]] = seg.get("messages") or []
+        except Exception:
+            decision["why"] = "transcript snapshot unavailable"
+            logger.debug("ipm: delete refused (%s)", decision["why"])
+            self_clear(paths, [store.hash_session_id(t) for t in targets])
+            return "refused"
+        admitted_state = {t: read_row_checked(paths.db_path, t) for t in targets}
+
         gone: list[str] = []
         with store.store_lock(paths.data_dir):  # admission + delete + verify: one hold
             store.mutate("ledger", paths.data_dir, check)
             if not decision["ok"]:
                 logger.debug("ipm: delete refused (%s)", decision["why"])  # fixed vocabulary, no ids
                 return "refused"
-            # Transcript fence (round-#4 Opus F7): capture each target's exact
-            # display snapshot NOW; core re-checks it inside its own write
-            # transaction, so a /resume plus a new message landing between
-            # admission and the delete aborts the deletion instead of deleting
-            # a chat the user just reopened.
-            expected_display: dict[str, list[dict[str, Any]]] | None = {}
-            try:
-                raw = db.export_session(raw_id, include_compacted=True)
-                expected_display = {
-                    seg["id"]: seg.get("messages") or []
-                    for seg in (raw.get("segments") or [raw]) if seg.get("id")
-                } if raw else None
-            except Exception:
-                expected_display = None
-            if expected_display is None:
-                decision["why"] = "transcript snapshot unavailable"
-                logger.debug("ipm: delete refused (%s)", decision["why"])
-                self_clear(paths, [store.hash_session_id(t) for t in targets])
-                return "refused"
+            # State fence: refuse if any target's row changed between the
+            # transcript capture and this hold (e.g. /resume touched only
+            # ended_at, which the display snapshot cannot see). Residual
+            # (disclosed): a reopen landing between this re-read and core's
+            # own transaction, changing only closed-state, is unfenced —
+            # core exposes no atomic closed-state predicate.
+            for t in targets:
+                now_state = read_row_checked(paths.db_path, t)
+                if now_state != admitted_state.get(t):
+                    decision["why"] = "session state changed during fencing"
+                    logger.debug("ipm: delete refused (%s)", decision["why"])
+                    self_clear(paths, [store.hash_session_id(x) for x in targets])
+                    return "refused"
             try:
                 deleted = db.delete_session(
                     raw_id, sessions_dir=None,
@@ -920,7 +955,6 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
                 self_clear(paths, [store.hash_session_id(t) for t in still])
             # 'error' targets keep their intent flag: residue recovery verifies them later.
             if gone:
-                cleanup_session_files(paths, gone)
                 gone_hashes = {store.hash_session_id(t) for t in gone}
 
                 def mark(l: dict[str, Any]) -> dict[str, Any]:
@@ -936,9 +970,13 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
 
                 store.mutate("ledger", paths.data_dir, mark)
         # File cleanup + WAL checkpoint run OUTSIDE the lock (round-#4 Opus
-        # F1): they act on already verified-absent ids, and holding the shared
-        # flock across core's media collection and the TRUNCATE checkpoint
-        # stalls every other store user (LLM audit appends, observations).
+        # F1; round-#5 Astra F3 removed the duplicate in-hold call): they act
+        # on already verified-absent ids, and holding the shared flock across
+        # core's media collection and the TRUNCATE checkpoint stalls every
+        # other store user. Crash window (disclosed): a crash between the
+        # ledger mark and this cleanup orphans media files until the next
+        # sweep/deep-clean pass collects them — deletion is already committed,
+        # so no privacy regression, only leftover files.
         if gone:
             cleanup_session_files(paths, gone)
             flush_wal(paths.db_path)

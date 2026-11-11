@@ -172,6 +172,7 @@ def status_text(paths=None) -> str:
     lines.append("What stays (never removed by this plugin): final replies kept for retries (by Hermes design),")
     lines.append("CLI input history (~/.hermes/.hermes_history), paste files, interrupt_debug.log, deleted bytes in")
     lines.append("free DB pages until a deep clean, auxiliary calls without our flags, max-iterations summary call,")
+    lines.append("MoA advisor fan-out (with provider: moa the advisors receive the full unstripped request BEFORE private mode runs; aggregation is blocked),")
     lines.append("codex_app_server runtime, safe-mode sessions, gateway shutdown snapshots/spools, save_trajectories,")
     lines.append("spawn-ledger.json for -q, logs written before this plugin loaded, backups, SSD remanence, terminal")
     lines.append("scrollback, messages on messaging platforms, external memory providers, and the earlier parts")

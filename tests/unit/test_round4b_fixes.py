@@ -184,11 +184,15 @@ def test_failed_config_read_fails_toward_no_deletion(monkeypatch, tmp_path):
 # --- F5-A: bedrock_converse gets a real terminal block ---------------------------
 
 def test_bedrock_converse_block_is_chat_shaped():
+    # round-#5 Opus: core's BedrockTransport.validate_response requires a raw
+    # Converse dict with an 'output' key (a ChatCompletion dict is rejected)
+    from agent.transports.bedrock import BedrockTransport
     shaped = synthetic.block_response("bedrock_converse", "Blocked.")
-    assert shaped is not None
-    assert getattr(shaped, "choices", None) or isinstance(shaped, dict)
+    assert isinstance(shaped, dict) and "output" in shaped
+    assert BedrockTransport().validate_response(shaped) is True
     dict_shape = synthetic.block_response_dict("bedrock_converse", "Blocked.")
-    assert dict_shape["choices"][0]["message"]["content"] == "Blocked."
+    assert BedrockTransport().validate_response(dict_shape) is True
+    assert dict_shape["output"]["message"]["content"][0]["text"] == "Blocked."
 
 
 def test_bedrock_converse_positive_block_does_not_scrub(world):

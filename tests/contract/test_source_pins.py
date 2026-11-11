@@ -177,13 +177,13 @@ def test_session_filename_component_matches_core():
         assert session_filename_component(sid) == _safe_session_filename_component(sid), sid
 
 
-def test_dump_name_matcher_never_matches_neighbour():
+def test_dump_name_matcher_never_matches_neighbour(tmp_path):
     """abc's dump cleanup must not match abc_extra's dumps (§6 row 17)."""
-    import os
+    # round-#5 Astra F4: per-test dir (tmp_path), never the shared HOME parent.
     from conftest import FakePaths
     from ipm.lifecycle import cleanup_session_files
 
-    paths = FakePaths(Path(os.environ["HOME"]).parent / "dump-neighbour")
+    paths = FakePaths(tmp_path / "dump-neighbour")
     paths.sessions_dir.mkdir(parents=True, exist_ok=True)
     dumps = {
         "request_dump_abc_20261110_120000_000001.json": "abc's dump",
@@ -201,12 +201,13 @@ def test_dump_name_matcher_never_matches_neighbour():
             assert (paths.sessions_dir / name).read_text() == content
 
 
-def test_exact_snapshot_names():
-    import os
+def test_exact_snapshot_names(tmp_path):
+    # round-#5 Astra F4: per-test dir (tmp_path) — a HOME-parent dir is SHARED
+    # across concurrent gate runs and they delete each other's fixtures.
     from conftest import FakePaths
     from ipm.lifecycle import cleanup_session_files
 
-    paths = FakePaths(Path(os.environ["HOME"]).parent / "dump-names")
+    paths = FakePaths(tmp_path / "dump-names")
     paths.sessions_dir.mkdir(parents=True, exist_ok=True)
     for name in ["abc.json", "abc.jsonl", "session_abc.json", "keep.json"]:
         (paths.sessions_dir / name).write_text("x")
