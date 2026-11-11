@@ -154,11 +154,19 @@ def handle_private_command(raw_args: str, *, session_id: str | None = None, plat
 # --- setup wizard (TTY only, §3.9) -------------------------------------------
 
 _ACCOUNT_CHECKLIST = [
-    ("claude", "Anthropic: turn OFF \"Help improve our AI models\" in Claude settings (Pro/Max)"),
-    ("chatgpt", "ChatGPT: turn OFF \"Improve the model for everyone\" in settings"),
-    ("codex", "Codex: turn OFF \"Include environments\" in Codex settings"),
-    ("openrouter", "OpenRouter: review privacy settings at openrouter.ai/settings/privacy"),
-    ("nous", "Nous Portal: enable Privacy Mode in the Portal"),
+    # (key, routes.json row id, prompt) — row ids are EXPLICIT: substring
+    # matching never bound ('claude'/'chatgpt' matched no row), so these
+    # confirmations never took effect (2026-11-11 adversarial round).
+    ("claude", "anthropic-oauth",
+     "Anthropic: turn OFF \"Help improve our AI models\" in Claude settings (Pro/Max)"),
+    ("codex", "openai-codex-backend",
+     "ChatGPT/Codex: turn OFF \"Improve the model for everyone\" and \"Include environments\" in ChatGPT settings"),
+    ("openrouter", "openrouter",
+     "OpenRouter: review privacy settings at openrouter.ai/settings/privacy"),
+    ("nous", "nous-portal",
+     "Nous Portal: enable Privacy Mode in the Portal"),
+    ("nebius", "nebius",
+     "Nebius: confirm org Zero-Data-Retention in the console"),
 ]
 
 
@@ -220,8 +228,9 @@ def run_setup(paths=None) -> int:
     print()
     print("History removal consent — what REMOVAL does on your surfaces:")
     print("  Removes: closed private chats from Hermes history (sessions, messages, search index)")
-    print("  via Hermes's own fenced delete. Whole lineages only (compression chains, delegate")
-    print("  children). Chats created before setup, while off, or kept with /private keep survive.")
+    print("  via Hermes's own fenced delete, only where the whole lineage closed cleanly.")
+    print("  Compression roots never close cleanly, so those earlier parts are KEPT and disclosed.")
+    print("  Chats created before setup, while off, or kept with /private keep survive.")
     print("  What STAYS: final replies kept for retries, CLI input history, pastes, deleted bytes")
     print("  in free DB pages until a deep clean, aux calls without our flags, logs from before")
     print("  this plugin loaded, and more — see /private status and the README \"What stays\" table.")
@@ -234,10 +243,11 @@ def run_setup(paths=None) -> int:
     print()
     print("One-time account settings (each confirmed here, shown as 'you confirmed (not verified)'):")
     confirmations: dict[str, Any] = {}
-    for key, label in _ACCOUNT_CHECKLIST:
+    for key, row_id, label in _ACCOUNT_CHECKLIST:
         answer = _ask(f"  {label} — done?", "n").lower()
         if answer.startswith("y"):
-            confirmations[key] = {"confirmed_at": time.time(), "note": "confirmed in setup"}
+            confirmations[key] = {"row_id": row_id,
+                                  "confirmed_at": time.time(), "note": "confirmed in setup"}
     print()
     allow_plaintext = _ask("  Allow http:// to non-loopback hosts (cleartext)? y/N",
                            "y" if settings.get("allow_plaintext_remote", False) else "n").lower()
@@ -255,6 +265,7 @@ def run_setup(paths=None) -> int:
         "strip_persona": strip_persona.startswith("y"),
         "audit_log": bool(settings.get("audit_log", True)),
         "block_training": block_training.startswith("y"),
+        "remove_history_on_close": consent.startswith("y"),
         "deep_clean_reminder": reminder if reminder in {"weekly", "monthly", "off"} else "weekly",
     }
 
@@ -280,7 +291,8 @@ def run_setup(paths=None) -> int:
         table = routes_mod.load_table()
         rev = table.get("policy_rev")
         for key, conf in confirmations.items():
-            row = next((r for r in table.get("rows", []) if r.get("id") == key or key in str(r.get("id"))), None)
+            row = next((r for r in table.get("rows", [])
+                        if r.get("id") == conf.get("row_id")), None)
             host = ""
             provider = ""
             if row:
@@ -288,7 +300,7 @@ def run_setup(paths=None) -> int:
                 hosts = match.get("base_url_hosts") or []
                 host = hosts[0] if hosts else ""
                 provider = (match.get("provider_ids") or [""])[0]
-            existing[key] = {"row_id": row.get("id") if row else key, "host": host,
+            existing[key] = {"row_id": conf.get("row_id") if row else key, "host": host,
                              "provider": provider, "policy_rev": rev, **conf}
         return existing
 
@@ -296,7 +308,8 @@ def run_setup(paths=None) -> int:
     store.mutate("confirmations", paths.data_dir, write_confirmations)
     print()
     print("Setup complete. Summary:")
-    print(f"  mode={new_settings['mode']}  cleanup={'ENABLED' if consent.startswith('y') else 'disabled (no deletion will happen)'}")
+    enrolled_now = lifecycle.cleanup_enrolled(read_settings(paths), store.read("meta", paths.data_dir))
+    print(f"  mode={new_settings['mode']}  cleanup={'ENABLED' if enrolled_now else 'disabled (no deletion will happen)'}")
     print(f"  surfaces={new_settings['apply_to_platforms']}  use_memory={new_settings['use_memory']}  save_memory={new_settings['save_memory']}")
     print(f"  learn_skills={new_settings['learn_skills']}  keep_history={new_settings['keep_history']}")
     print(f"  allow_unverified={new_settings['allow_unverified']}  block_training={new_settings['block_training']}")
@@ -321,7 +334,7 @@ def cli_register(setup_fn) -> None:
     sub.add_parser("setup", help="Guided setup (TTY only); records cleanup consent")
     preset_p = sub.add_parser("preset", help="Apply a settings profile (non-interactive)")
     preset_p.add_argument("preset_name", choices=["complete", "provider-private"],
-                          help="complete = strict everywhere; provider-private = Hermes features on, providers locked down")
+                          help="complete = strictest coverage; provider-private = Hermes features on, main-chat requests locked down (see /private status)")
 
 
 def cli_handler(args, **_kw: Any) -> int:

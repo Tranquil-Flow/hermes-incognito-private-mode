@@ -419,16 +419,44 @@ def replace_persona_span(request: dict[str, Any], persona_text: str) -> tuple[di
             new_request = dict(request)
         return new_request
 
+    instructions = request.get("instructions")
+    if isinstance(instructions, str):
+        text2 = sub(instructions)
+        if text2 != instructions:
+            ensure_copy()["instructions"] = text2
     messages = request.get("messages")
     if isinstance(messages, list):
+        # Accumulate into ONE new list: rebuilding from the original snapshot
+        # per replacement made a later replacement clobber an earlier one
+        # (2026-11-11 adversarial round, found by test).
+        new_messages: list[Any] | None = None
+
+        def set_message(idx: int, msg2: dict[str, Any]) -> None:
+            nonlocal new_messages, messages
+            if new_messages is None:
+                new_messages = list(messages)
+            new_messages[idx] = msg2
+
         for i, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 continue
-            if i == 0 and msg.get("role") in ("system", "developer") and isinstance(msg.get("content"), str):
-                text2 = sub(msg["content"])
-                if text2 != msg["content"]:
-                    ensure_copy()["messages"] = [
-                        {**msg, "content": text2} if j == i else m for j, m in enumerate(messages)]
+            content = msg.get("content")
+            if msg.get("role") in ("system", "developer") and isinstance(content, str):
+                text2 = sub(content)
+                if text2 != content:
+                    set_message(i, {**msg, "content": text2})
+            if isinstance(content, list):
+                new_blocks: list[Any] | None = None
+                for bi, part in enumerate(content):
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        text2 = sub(part["text"])
+                        if text2 != part["text"]:
+                            new_blocks = list(content) if new_blocks is None else new_blocks
+                            new_blocks[bi] = {**part, "text": text2}
+                if new_blocks is not None:
+                    set_message(i, {**msg, "content": new_blocks})
+        if new_messages is not None:
+            ensure_copy()["messages"] = new_messages
     system = request.get("system")
     if isinstance(system, str):
         text2 = sub(system)

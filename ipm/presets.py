@@ -1,11 +1,14 @@
 """Usability presets: two named profiles over the existing settings knobs.
 
-- "complete": total privacy. Nothing stored by providers, nothing stored by
-  Hermes chat history, memory/skills features blocked, strict providers.
+- "complete": strictest coverage. Main-chat requests go to verified or
+  you-confirmed routes only; memory blocks and the persona are stripped
+  (best-effort, disclosed); memory/skills features blocked; history removed
+  on close for CLI chats after setup consent. Background/auxiliary calls are
+  disclosed, not enforced — see /private status for the full coverage lines.
 - "provider-private": Hermes features fully on (memory saves, skill learning,
-  history/search), but the model provider side is locked down: only providers
-  with verified no-training behaviour (or per-request flags we apply), and
-  Hermes-side extras (memory blocks, persona) are never sent.
+  history/search), main-chat requests locked down: verified or you-confirmed
+  routes only, memory blocks + persona stripped from requests. Background
+  calls disclosed, not enforced.
 
 Presets are WRITERS: they set explicit, inspectable settings values. Consent
 for history removal is never granted by a preset — the setup wizard asks.
@@ -44,11 +47,14 @@ PRESETS: dict[str, dict[str, object]] = {
 }
 
 _PRESET_BLURBS = {
-    "complete": "Complete privacy — nothing kept by providers OR Hermes history; "
-                "memory/skills features off; strict providers only",
-    "provider-private": "Private providers — Hermes features fully on (memory, skills, "
-                        "history/search); only verified no-training providers; Hermes-side "
-                        "info (memory blocks, persona) never sent",
+    "complete": "Complete — main-chat requests: verified or you-confirmed routes only, "
+                "memory blocks + persona (best-effort) stripped; memory/skills/past-chat "
+                "search blocked; history removed on close for CLI chats after setup "
+                "consent; background calls disclosed, not enforced",
+    "provider-private": "Provider-private — Hermes memory/skills/history features stay on; "
+                        "main-chat requests: verified or you-confirmed routes only, memory "
+                        "blocks + persona (best-effort) stripped; background calls "
+                        "disclosed, not enforced",
 }
 
 

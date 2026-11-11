@@ -131,6 +131,20 @@ def read_settings(paths: CapturedPaths | None = None) -> dict[str, Any]:
 
 def _validated(settings: dict[str, Any]) -> dict[str, Any]:
     out = dict(DEFAULTS)
+    # `mode: off` unquoted parses as boolean False — that is the user's typed
+    # intent, honor it before the generic str coercion (which would silently
+    # turn it into 'private', a protection change).
+    raw_mode = settings.get("mode")
+    if raw_mode is False:
+        settings = dict(settings)
+        settings["mode"] = "off"
+    # Deletion-scope keys fail toward NO deletion before the generic coercion
+    # (whose default for remove_history_on_close is True — a widening default).
+    settings = dict(settings)
+    if not isinstance(settings.get("remove_history_on_close"), bool):
+        settings["remove_history_on_close"] = False
+    if not isinstance(settings.get("apply_to_platforms"), list):
+        settings["apply_to_platforms"] = []
     for key, default in DEFAULTS.items():
         value = settings.get(key, default)
         if isinstance(default, bool):
@@ -139,13 +153,19 @@ def _validated(settings: dict[str, Any]) -> dict[str, Any]:
             out[key] = [v for v in value if isinstance(v, str)] if isinstance(value, list) else list(default)
         elif isinstance(default, str):
             out[key] = str(value) if isinstance(value, str) else default
-    if out["mode"] not in VALID_MODES:
-        out["mode"] = DEFAULTS["mode"]
+    if out["mode"] is True or out["mode"] not in VALID_MODES:
+        out["mode"] = DEFAULTS["mode"]  # unknown -> default (private)
     if out["deep_clean_reminder"] not in {"off", "weekly", "monthly"}:
         out["deep_clean_reminder"] = "weekly"
     out["apply_to_platforms"] = [p for p in out["apply_to_platforms"] if p in VALID_PLATFORMS]
     if not out["apply_to_platforms"]:
-        out["apply_to_platforms"] = list(DEFAULTS["apply_to_platforms"])
+        # Deletion scope fails toward NO deletion: an invalid value (e.g. 'TUI'
+        # typed in the wizard, 'none', or a non-list) must not silently widen
+        # cleanup to the default platforms (2026-11-11 adversarial round).
+        out["apply_to_platforms"] = []
+    # Non-bool remove_history_on_close must not coerce to deletion.
+    if not isinstance(out["remove_history_on_close"], bool):
+        out["remove_history_on_close"] = False
     return out
 
 

@@ -190,9 +190,15 @@ def classify(provider: str | None, base_url: str | None, api_mode: str | None = 
         for cid, conf in confirmations.items():
             if not isinstance(conf, dict):
                 continue
-            if str(conf.get("host") or "").lower() == host and \
-               str(conf.get("provider") or "").lower() == (provider or "").lower() and \
-               str(conf.get("policy_rev") or "") == str(table.get("policy_rev")):
+            conf_host = str(conf.get("host") or "").lower()
+            conf_provider = str(conf.get("provider") or "").lower()
+            rev_ok = str(conf.get("policy_rev") or "") == str(table.get("policy_rev"))
+            provider_only_row = conf_host == ""  # provider-only row (e.g. nebius)
+            if rev_ok and (
+                (conf_host == host and conf_provider == (provider or "").lower())
+                or (provider_only_row and conf_provider == (provider or "").lower()
+                    and host and not _loopback_host(host))
+            ):
                 confirmed_ids.add(str(conf.get("row_id") or cid))
     if confirmed_ids:
         # A confirmation upgrades ONLY its ACCOUNT_SETTING/ORG_AGREEMENT row's
@@ -310,7 +316,7 @@ def classify_background(facts: dict[str, Any], confirmations: dict[str, Any] | N
     return worst
 
 
-MACHINE_LINE = "history removed on close; some copies remain"
+MACHINE_LINE = "history removed on close (CLI chats by default; opt in more surfaces); some copies remain"
 
 
 def coverage_lines(facts: dict[str, Any], confirmations: dict[str, Any] | None = None,

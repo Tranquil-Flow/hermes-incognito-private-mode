@@ -267,8 +267,11 @@ def on_llm_request(**kwargs: Any):
             persona = _persona_text(paths)
             if persona:
                 new_request, n = strip_mod.replace_persona_span(new_request, persona)
+                _strip_state.persona_stripped = n
                 if n:
                     trace["applied"].append(f"stripped persona spans={n}")
+            else:
+                _strip_state.persona_stripped = 0
 
         if new_request is not request:
             return {"request": new_request, "source": trace["source"],
@@ -339,12 +342,23 @@ def on_llm_execution(**kwargs: Any):
 
             persona_state = None
             if settings.get("strip_persona", False) and block_message is None:
-                persona = _persona_text(paths)
-                if persona:
-                    payload, n = strip_mod.replace_persona_span(payload, persona)
-                    persona_state = "stripped" if n else "present-not-located"
+                already = getattr(_strip_state, "persona_stripped", None)
+                _strip_state.persona_stripped = None  # consume
+                if already:
+                    persona_state = "stripped"  # llm_request already replaced it
                 else:
-                    persona_state = "absent"
+                    persona = _persona_text(paths)
+                    if persona:
+                        payload, n = strip_mod.replace_persona_span(payload, persona)
+                        if n:
+                            persona_state = "stripped"
+                        else:
+                            # distinguish 'not in this request' from 'present but unremovable'
+                            persona_state = ("present-not-located"
+                                             if persona[:120] in json.dumps(payload)[:20000]
+                                             else "absent")
+                    else:
+                        persona_state = "absent"
             elif settings.get("strip_persona", False):
                 persona_state = "absent"
 
