@@ -127,7 +127,6 @@ def _memory_bodies_all(paths) -> list[str]:
     """Current candidates plus the bounded history of past versions, current
     first. Strip reconstruction matches ANY version the session observed."""
     current = _memory_bodies(paths)
-    hist_key = "|".join(s[0] for s in _memory_bodies_last_sig(paths)) if False else None
     out: list[str] = list(current)
     with _history_lock:
         for key, sig_list in _memory_bodies_history.items():
@@ -138,8 +137,6 @@ def _memory_bodies_all(paths) -> list[str]:
     return out
 
 
-def _memory_bodies_last_sig(paths):
-    return []
 
 
 def _core_redacted_join(entries: list[str], file_idx: int, paths) -> str | None:

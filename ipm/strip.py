@@ -181,6 +181,17 @@ def strip_memory_blocks_checked(text: str, bodies: list[str] | None = None) -> t
         # tail invisibly. Length-advertised blocks therefore rely solely on
         # the primary path; candidates apply only to legacy headers without
         # a usable length.
+        #
+        # Known boundary (round-#5 self-review, integrity-only): a header
+        # FORGED to advertise an observed version's length, with a body of
+        # that version plus attacker-chosen extra lines, strips the proven
+        # span and forwards the extra lines unflagged — "═ frame \n
+        # non-blank continuation" is indistinguishable from a legitimate
+        # neighbouring text line. The extra lines are attacker-authored (the
+        # forger already knows the matched body), so this is spoofing, not a
+        # confidentiality leak; core writes TRUE lengths, so honest snapshots
+        # are unaffected. History candidates are exact full-body matches of
+        # real observed versions, so they add no new exposure here.
         if body_end == -1 and snap_len is None:
             for cand in _render_candidates(title_line, bodies):
                 if text.startswith(cand, header_start):
