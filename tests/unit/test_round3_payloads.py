@@ -178,21 +178,24 @@ def test_logfilter_render_error_is_content_free():
     assert not record.args
 
 
-def test_audit_append_really_waits_for_store_lock(world, monkeypatch):
+def test_audit_append_serializes_on_audit_lock_not_fence_lock(world, monkeypatch):
+    """Round-4 Astra F7: audit appends coordinate on the dedicated audit lock
+    (rotation safety across processes) and are INDEPENDENT of the ledger/fence
+    lock — a foreground request must never serialize behind a deletion fence."""
     paths, _settings = world
     attempted = threading.Event()
     entered = threading.Event()
-    real_lock = store.store_lock
+    real_audit_lock = store.audit_lock
     from contextlib import contextmanager
     @contextmanager
     def watched_lock(*args, **kwargs):
         attempted.set()
-        with real_lock(*args, **kwargs) as acquired:
+        with real_audit_lock(*args, **kwargs) as acquired:
             entered.set()
             yield acquired
-    monkeypatch.setattr(store, "store_lock", watched_lock)
+    monkeypatch.setattr(store, "audit_lock", watched_lock)
     thread = threading.Thread(target=enforce._audit_append, args=(paths, {"label": "probe"}))
-    with real_lock(paths.data_dir):
+    with real_audit_lock(paths.data_dir):
         thread.start()
         assert attempted.wait(timeout=3)
         assert not entered.is_set()
@@ -200,6 +203,33 @@ def test_audit_append_really_waits_for_store_lock(world, monkeypatch):
     thread.join(timeout=5)
     assert not thread.is_alive() and entered.is_set()
     assert json.loads((paths.data_dir / "audit.jsonl").read_text())["label"] == "probe"
+
+
+def test_audit_append_does_not_wait_for_the_ledger_lock(world):
+    paths, _settings = world
+    release = threading.Event()
+    acquired = threading.Event()
+
+    def fence_holder():
+        with store.store_lock(paths.data_dir):
+            acquired.set()
+            release.wait(10)
+
+    t = threading.Thread(target=fence_holder, daemon=True)
+    t.start()
+    assert acquired.wait(5)
+    done = threading.Event()
+
+    def auditer():
+        enforce._audit_append(paths, {"label": "f7"})
+        done.set()
+
+    t2 = threading.Thread(target=auditer, daemon=True)
+    t2.start()
+    assert done.wait(5), "audit append serialized behind the fence lock"
+    release.set()
+    t.join(10)
+    assert json.loads((paths.data_dir / "audit.jsonl").read_text())["label"] == "f7"
 
 
 def test_ascii_retry_stripped_rules_still_block(world):
@@ -236,7 +266,7 @@ def test_unknown_api_mode_internal_error_scrubs_content(world, monkeypatch):
     # empty request and the turn fails downstream with nothing leaked.
     assert len(seen) == 1
     sent = seen[0]
-    assert sent.get("messages") == []  # content-free
+    assert sent == {"model": "m"}  # allowlist scrub: no content fields survive
     assert "SECRET-CONTENT" not in str(sent)
 
 
@@ -254,5 +284,5 @@ def test_unknown_api_mode_positive_block_scrubs_content(world):
         request=payload, session_id="scrub-block", platform="cli", provider="mystery-provider",
         base_url="https://attacker.example/v1", api_mode="mystery", model="m",
         next_call=lambda req: seen.append(req) or "provider-answer")
-    assert len(seen) == 1 and seen[0].get("messages") == []
+    assert len(seen) == 1 and seen[0] == {"model": "m"}
     assert "SECRET-BLOCKED" not in str(seen[0])

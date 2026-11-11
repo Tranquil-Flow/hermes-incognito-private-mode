@@ -174,8 +174,14 @@ def strip_memory_blocks_checked(text: str, bodies: list[str] | None = None) -> t
                     body_end = end
         # SECONDARY: exact reconstruction from fed bodies (cleaned + raw).
         # Candidates are FULL blocks (header+body), so they anchor at the
-        # header start, not the body start.
-        if body_end == -1:
+        # header start, not the body start. Round-#4 Astra F1: when the title
+        # advertises a snapshot length, a candidate match is ONLY proof if it
+        # consumed exactly that span — a truncated file would otherwise match
+        # as a proper PREFIX, strip the identifying header and leak the frozen
+        # tail invisibly. Length-advertised blocks therefore rely solely on
+        # the primary path; candidates apply only to legacy headers without
+        # a usable length.
+        if body_end == -1 and snap_len is None:
             for cand in _render_candidates(title_line, bodies):
                 if text.startswith(cand, header_start):
                     body_end = header_start + len(cand)

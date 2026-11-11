@@ -4,9 +4,13 @@ import time
 import pytest
 
 
-def _render(entries, title="MEMORY (your personal notes) [9% — 200/2,200 chars]"):
+def _render(entries, title=None):
+    # production headers carry the TRUE snapshot length (core writes
+    # len(content)); fixtures must too, or provenance checks refuse them
     rule = "═" * 46
     body = "\n§\n".join(entries)
+    if title is None:
+        title = f"MEMORY (your personal notes) [9% \u2014 {len(body):,}/2,200 chars]"
     return f"intro\n\n{rule}\n{title}\n{rule}\n{body}\n\nskills"
 
 

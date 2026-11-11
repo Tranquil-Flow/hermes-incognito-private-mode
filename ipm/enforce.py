@@ -82,7 +82,7 @@ def _memory_bodies(paths) -> list[str]:
     if cached_sig == key:
         return cached_bodies
     bodies: list[str] = []
-    for text in texts:
+    for idx, text in enumerate(texts):
         segments = text.split("\n§\n")
         entries = [e.strip() for e in segments]
         entries = [e for e in entries if e]
@@ -95,8 +95,42 @@ def _memory_bodies(paths) -> list[str]:
         raw = "\n§\n".join(entries)
         if raw != cleaned and raw not in bodies:
             bodies.append(raw)
+        # round-#4 Astra F5: core's LOADER replaces threat-matching entries
+        # with a "[BLOCKED: ...]" placeholder in the frozen prompt snapshot
+        # (load_from_disk -> _sanitize), so an unchanged file whose snapshot
+        # was redacted can never match cleaned/raw. Add the redacted join as
+        # a candidate, using core's own transform when importable.
+        redacted = _core_redacted_join(entries, idx, paths)
+        if redacted and redacted not in bodies:
+            bodies.append(redacted)
     _memory_bodies_cache = (key, bodies)
     return bodies
+
+
+def _core_redacted_join(entries: list[str], file_idx: int, paths) -> str | None:
+    """Entries as core's loader renders them into the snapshot: threat hits
+    replaced by the documented [BLOCKED: ...] placeholder, dedup preserved.
+    Returns None when core's transform is unavailable (then only cleaned/raw
+    candidates exist and redacted snapshots fail closed, as before)."""
+    try:
+        from tools.threat_patterns import scan_for_threats  # public allowlist
+        filename = "MEMORY.md" if file_idx == 0 else "USER.md"
+        target = "user" if filename == "USER.md" else "memory"
+
+        def _sanitize(entry: str) -> str:
+            if not entry or entry.startswith("[BLOCKED:"):
+                return entry
+            findings = scan_for_threats(entry, scope="strict")
+            if not findings:
+                return entry
+            return (f"[BLOCKED: {filename} entry contained threat pattern(s): "
+                    f"{', '.join(findings)}. "
+                    f"Removed from system prompt; use memory(action=remove, target='{target}') "
+                    f"to delete the original.]")
+
+        return "\n§\n".join(dict.fromkeys(_sanitize(e) for e in entries))
+    except Exception:
+        return None
 
 
 def _session_state(session_id: str | None, data_dir) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -145,25 +179,16 @@ def _anthropic_auth_hint(request: dict[str, Any], api_mode: str | None) -> str |
     return "api_key"
 
 
-_CONTENT_KEYS = ("messages", "input", "prompt", "system", "instructions",
-                 "contents", "context", "tools", "tool_choice")
-
-
 def _content_free_request(request: dict[str, Any]) -> dict[str, Any]:
-    """Strip every content-bearing field from a request (round-#3 close-out:
-    for an api_mode with no synthetic response shape, the only guaranteed
-    fail-closed move is sending a request that carries NOTHING: whatever the
-    transport or provider does with it, no user content can leave)."""
-    scrubbed = dict(request)
-    for k in _CONTENT_KEYS:
-        v = scrubbed.get(k)
-        if isinstance(v, list):
-            scrubbed[k] = []
-        elif isinstance(v, str):
-            scrubbed[k] = ""
-        elif v is not None:
-            scrubbed.pop(k, None)  # unknown-typed content field: drop it
-    return scrubbed
+    """An ALLOWLIST-scrubbed request for transports with no known response
+    schema (round-#4 Astra F3): only non-content routing fields survive, so
+    nothing can ride along — extra_body, metadata, extra_headers/query and
+    every unlisted extension field are dropped (the OpenAI SDK merges
+    extra_body into the serialized wire body even when top-level messages
+    are empty). Residual disclosure: a downstream middleware could still
+    reconstruct content from the chain's original_request context — that is
+    documented, not silently claimed as protection."""
+    return {"model": request.get("model")} if isinstance(request.get("model"), str) else {}
 
 
 def _classify(request: dict[str, Any], kwargs: dict[str, Any], settings: dict[str, Any],
@@ -205,11 +230,13 @@ def _audit_append(paths: Any, record: dict[str, Any]) -> None:
             os.chmod(path.parent, 0o700)
         except Exception:
             pass
-        # Append under the store lock: concurrent gateway/CLI processes must
-        # not interleave the truncate-and-rewrite cap rotation.
+        # Append under the AUDIT lock (round-#4 Astra F7): a dedicated flock
+        # so optional audit logging can never serialize a foreground request
+        # behind a long deletion fence hold on the ledger lock. Concurrent
+        # gateway/CLI processes still never interleave the cap rotation.
         from . import store as _store
 
-        with _store.store_lock(paths.data_dir):
+        with _store.audit_lock(paths.data_dir):
             if not path.exists():
                 path.write_text(line + "\n")
                 os.chmod(path, 0o600)
@@ -529,6 +556,14 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
         system = payload.get("system")
         if system is not None:
             for text in strip_mod.content_texts(system):
+                if strip_mod.memory_title_residue(text):
+                    return True
+        # codex_responses carries the system surface as `instructions`
+        # (round-#4 Astra F2: the ASCII-sanitization residue check must cover
+        # every transport's system surface, or mangled memory passes).
+        instructions = payload.get("instructions")
+        if instructions is not None:
+            for text in strip_mod.content_texts(instructions):
                 if strip_mod.memory_title_residue(text):
                     return True
     except Exception:

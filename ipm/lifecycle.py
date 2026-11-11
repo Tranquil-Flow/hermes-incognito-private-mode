@@ -874,9 +874,15 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
                     exclude_active_write_guards=True,
                 )
             except Exception:
-                self_clear(paths, [store.hash_session_id(t) for t in targets])
-                logger.debug("ipm: fenced delete raised (guard/refusal)")
-                return "refused"
+                # round-#4 Astra F6: a raise does NOT prove the deletion did
+                # not commit (core commits rows before post-delete media
+                # collection, which can still fail). Treat the outcome as
+                # UNKNOWN and let exact-id verification decide below — a
+                # committed-but-raised delete proceeds to cleanup and a
+                # fenced tombstone instead of leaking session files with no
+                # retry intent.
+                logger.debug("ipm: fenced delete raised (outcome unknown)")
+                deleted = True
             if not deleted:
                 self_clear(paths, [store.hash_session_id(t) for t in targets])
                 return "refused"

@@ -24,9 +24,13 @@ from ipm import strip
 
 # --- strip: blank-line entries (audit HIGH) -----------------------------------
 
-def _render(entries, title="MEMORY (your personal notes) [9% — 200/2,200 chars]"):
+def _render(entries, title=None):
+    # production headers carry the TRUE snapshot length (core writes
+    # len(content)); fixtures must too, or provenance checks refuse them
     rule = "═" * 46
     body = "\n§\n".join(entries)
+    if title is None:
+        title = f"MEMORY (your personal notes) [9% \u2014 {len(body):,}/2,200 chars]"
     return f"intro part\n\n{rule}\n{title}\n{rule}\n{body}\n\nskills section"
 
 
@@ -71,7 +75,7 @@ def test_reversed_context_tags_are_residue_not_span():
 
 def test_system_message_developer_role_is_stripped():
     entries = ["secret entry"]
-    text = _render(entries, title="USER PROFILE (who the user is) [5% — 40/1,375 chars]")
+    text = _render(entries, title=f"USER PROFILE (who the user is) [5% — {len(entries[0]):,}/1,375 chars]")  # true snapshot length
     strip.set_memory_bodies(["\n§\n".join(entries)])
     try:
         req = {"messages": [{"role": "developer", "content": text},

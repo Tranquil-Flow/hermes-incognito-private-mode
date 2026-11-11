@@ -71,7 +71,7 @@ Plus:
 - **Tool vetoes**: `memory` (unless `save_memory`), `skill_manage` (unless
   `learn_skills`), `session_search` (unless `keep_history`), and an external
   memory provider's tool **only when it is named after the provider id**.
-  A veto returns a clear message; an internal error in the check also vetoes — SDK-shaped responses for the three known transports, and for any other transport a content-free request (the turn fails downstream with zero user content sent).
+  A veto returns a clear message; an internal error in the check also vetoes — SDK-shaped responses for the three known transports, and for any other transport an allowlist-scrubbed request (only the model field survives; the turn fails downstream with zero user content sent). Residual: a third-party middleware downstream of this plugin could reconstruct content from the middleware chain's original_request context — unsupported transports are therefore best-effort protected and this is disclosed rather than claimed as absolute.
 - **Log redaction**: inbound-message, conversation-turn and tool-call preview
   log lines carry `[redacted]` instead of your text while mode is not `off`;
   the redactor is linear-time (no ReDoS). Lines written before the plugin

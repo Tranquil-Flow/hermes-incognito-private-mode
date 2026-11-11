@@ -57,7 +57,11 @@ def _lock_path(data_dir: Path) -> Path:
 # delete_session. Per-thread, per-dir reentrancy lets OUR hooks nest while
 # other threads/processes still serialize on the flock.
 _reentrancy_lock = threading.Lock()
-_held_locks: dict[tuple[int, str], int] = {}
+_registry_pid = os.getpid()
+# key: (pid, thread ident, lock identity) — round-#4 Astra F4: a forked child
+# inherits the parent's registry and thread idents, which would let it bypass
+# the flock entirely; store_lock() resets the registry when the pid changes.
+_held_locks: dict[tuple[int, int, str], int] = {}
 
 
 @contextmanager
@@ -70,7 +74,16 @@ def store_lock(data_dir: Path, blocking: bool = True):
     keep/off landing can never interleave with a fence that holds the lock.
     """
     data_dir = Path(data_dir)
-    token = (threading.get_ident(), str(data_dir))
+    global _registry_pid
+    with _reentrancy_lock:
+        if _registry_pid != os.getpid():
+            # forked child: inherited depth is not ours (round-#4 Astra F4).
+            # The child is single-threaded right after fork, so replacing the
+            # registry contents is race-free; inherited flock fds are shared
+            # open-file descriptions and are dropped when the parent closes.
+            _held_locks.clear()
+            _registry_pid = os.getpid()
+    token = (os.getpid(), threading.get_ident(), str(data_dir))
     with _reentrancy_lock:
         depth = _held_locks.get(token, 0)
     # NEVER hold _reentrancy_lock across the yield: the caller's body (and any
@@ -92,6 +105,60 @@ def store_lock(data_dir: Path, blocking: bool = True):
     data_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
     fd = os.open(_lock_path(data_dir), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        mode = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, mode)
+        except BlockingIOError:
+            yield False
+            return
+        with _reentrancy_lock:
+            _held_locks[token] = _held_locks.get(token, 0) + 1
+        try:
+            yield True
+        finally:
+            with _reentrancy_lock:
+                left = _held_locks.get(token, 1) - 1
+                if left <= 0:
+                    _held_locks.pop(token, None)
+                else:
+                    _held_locks[token] = left
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def audit_lock(data_dir: Path, blocking: bool = True):
+    """Dedicated flock for audit.jsonl appends/rotation (round-#4 Astra F7):
+    never held by the deletion fence, so optional audit logging cannot
+    serialize a foreground request behind a long fence hold. Same
+    reentrancy discipline as store_lock."""
+    audit_dir = Path(data_dir)
+    token = (os.getpid(), threading.get_ident(), str(audit_dir) + "::audit")
+    global _registry_pid
+    with _reentrancy_lock:
+        if _registry_pid != os.getpid():
+            _held_locks.clear()
+            _registry_pid = os.getpid()
+    with _reentrancy_lock:
+        depth = _held_locks.get(token, 0)
+    if depth > 0:
+        with _reentrancy_lock:
+            _held_locks[token] = depth + 1
+        try:
+            yield True
+        finally:
+            with _reentrancy_lock:
+                left = _held_locks[token] - 1
+                if left <= 0:
+                    _held_locks.pop(token, None)
+                else:
+                    _held_locks[token] = left
+        return
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(audit_dir, 0o700)
+    fd = os.open(audit_dir / "audit.lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         mode = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
