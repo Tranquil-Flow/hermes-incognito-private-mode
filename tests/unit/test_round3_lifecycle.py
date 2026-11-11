@@ -608,12 +608,8 @@ def test_keep_landing_during_fenced_delete_is_ordered_after_it(world, monkeypatc
     keep_done = _t.Event()
 
     def keep_lander():
-        def set_keep(l):
-            member = l.get(hash_session_id("race-keep"))
-            if isinstance(member, dict):
-                member["keep_override"] = "keep"
-            return l
-        _store.mutate("ledger", p.data_dir, set_keep)
+        # the REAL writer, exactly what /private keep runs
+        lifecycle.set_override("race-keep", "keep", p)
         keep_done.set()
 
     keep_thread = _t.Thread(target=keep_lander, daemon=True)

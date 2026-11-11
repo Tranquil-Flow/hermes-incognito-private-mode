@@ -400,8 +400,10 @@ def test_main_label_missing_keys_follow_enforcement_defaults():
 
 @pytest.fixture
 def isolated_config():
-    """run_setup / status write via save_plugin_setting into THIS worker's
-    isolated HERMES_HOME config: snapshot + restore every plugin key."""
+    """Snapshot + restore every plugin key around setup tests. The per-test
+    HERMES_HOME comes from the autouse _hermetic_home conftest fixture
+    (round-#4 Opus F5): writes land in a per-test copy of the harness config,
+    so concurrent gate runs cannot pollute each other."""
     from hermes_cli.config import load_config_readonly
     from hermes_cli.plugins_state import save_plugin_setting
 

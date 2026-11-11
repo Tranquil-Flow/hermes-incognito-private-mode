@@ -13,6 +13,7 @@ provider error propagates as-is (never re-run the call, never swallow).
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import json
 import os
@@ -42,6 +43,15 @@ _BLOCK_TEMPLATE = (
 )
 
 _memory_bodies_cache: tuple = ((), [])
+# Bounded history of past candidate sets (round-#4 Opus F2 availability fix):
+# core renders the prompt snapshot at LOAD time, so a snapshot taken before a
+# mid-session save matches the file version that existed then, not the current
+# one. Every candidate is a real past/current file render (full-body exact
+# match still required — provenance is not weakened, only widened to the
+# versions the session actually observed).
+_memory_bodies_history: dict[str, list] = {}
+_MEMORY_HISTORY_LIMIT = 6
+_history_lock = threading.Lock()
 
 # Ambiguity signal from the llm_request strip pass, consumed by the same
 # thread's llm_execution (request and execution hooks run sequentially on one
@@ -104,7 +114,32 @@ def _memory_bodies(paths) -> list[str]:
         if redacted and redacted not in bodies:
             bodies.append(redacted)
     _memory_bodies_cache = (key, bodies)
+    hist_key = "|".join(s[0] for s in sig) if sig else "none"
+    with _history_lock:
+        hist = _memory_bodies_history.setdefault(hist_key, [])
+        if not hist or hist[-1][0] != key:
+            hist.append((key, bodies))
+            del hist[:-_MEMORY_HISTORY_LIMIT]
     return bodies
+
+
+def _memory_bodies_all(paths) -> list[str]:
+    """Current candidates plus the bounded history of past versions, current
+    first. Strip reconstruction matches ANY version the session observed."""
+    current = _memory_bodies(paths)
+    hist_key = "|".join(s[0] for s in _memory_bodies_last_sig(paths)) if False else None
+    out: list[str] = list(current)
+    with _history_lock:
+        for key, sig_list in _memory_bodies_history.items():
+            for _sig, bodies in sig_list:
+                for b in bodies:
+                    if b not in out:
+                        out.append(b)
+    return out
+
+
+def _memory_bodies_last_sig(paths):
+    return []
 
 
 def _core_redacted_join(entries: list[str], file_idx: int, paths) -> str | None:
@@ -364,7 +399,7 @@ def on_llm_request(**kwargs: Any):
         # removed whole (blank lines inside entries are legal in core).
         if _memory_strip_active(settings, entry):
             new_request, counts = strip_mod.strip_request(
-                new_request, bodies=_memory_bodies(paths))
+                new_request, bodies=_memory_bodies_all(paths))
             _strip_state.ambiguous = bool(counts.get("ambiguous"))
             if counts["blocks"] or counts["spans"]:
                 trace["applied"].append(
@@ -530,7 +565,17 @@ def on_llm_execution(**kwargs: Any):
             pass
         return next_call(_content_free_request(request))
     if block_message is not None:
-        shaped = synthetic.block_response(api_mode, block_message)
+        # Shaping is guarded here too (round-4c): a construction RAISE must
+        # not escape to core's fail-open middleware handler — fall back to
+        # the dict shape, then to the content-free scrub, never to passthrough.
+        try:
+            shaped = synthetic.block_response(api_mode, block_message)
+        except Exception as exc:
+            logger.debug("ipm: synthetic shape raised (%s)", type(exc).__name__)
+            shaped = None
+        if shaped is not None:
+            return shaped
+        shaped = synthetic.block_response_dict(api_mode, block_message)
         if shaped is not None:
             return shaped
         # Unknown api_mode, positive block: send a CONTENT-FREE request — the

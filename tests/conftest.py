@@ -27,6 +27,33 @@ if _CORE_ROOT not in sys.path:
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_home(tmp_path, monkeypatch):
+    """Per-test HERMES_HOME (round-#4 Opus F5): setup/status write plugin
+    settings into $HERMES_HOME/config.yaml, so two concurrent gate runs
+    pollute each other through the shared harness home. Each test gets its
+    own home seeded from the harness config (same harness-substring path, so
+    the guard above keeps holding), and plugin-side cross-test state (memory
+    candidate caches/history) is reset."""
+    harness_home = os.environ.get("HERMES_HOME", "")
+    test_home = tmp_path / "hermes-home"
+    test_home.mkdir(parents=True, exist_ok=True)
+    if harness_home:
+        shared_cfg = Path(harness_home) / "config.yaml"
+        if shared_cfg.exists():
+            (test_home / "config.yaml").write_text(shared_cfg.read_text())
+    monkeypatch.setenv("HERMES_HOME", str(test_home))
+    from ipm import enforce as _enforce
+    with _enforce._history_lock:
+        _enforce._memory_bodies_history.clear()
+    _enforce._memory_bodies_cache = ((), [])
+    strip_state = getattr(_enforce, "_strip_state", None)
+    if strip_state is not None:
+        strip_state.ambiguous = False
+        strip_state.persona_stripped = None
+    yield
+
+
 class FakePaths:
     """CapturedPaths stand-in pointed at a temp profile."""
 

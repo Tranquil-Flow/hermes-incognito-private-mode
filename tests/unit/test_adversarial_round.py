@@ -101,7 +101,11 @@ def test_exact_reconstruction_strips_cleanly(patch_capture):
     rule = "\u2550" * 46
     body = "SECRET-ENTRY-ONE"
     title = f"MEMORY (your personal notes) [99% \u2014 {len(body):,}/2,200 chars]"
-    # file DIVERGED after the snapshot (extra entry saved mid-session)
+    # file DIVERGED after the snapshot (extra entry saved mid-session); the
+    # gateway observed the pre-save version at earlier requests (history)
+    from ipm.enforce import _memory_bodies_all
+    _write_real_memory(patch_capture, body)
+    _memory_bodies_all(patch_capture)
     _write_real_memory(patch_capture, f"{body}\n\u00a7\nENTRY-SAVED-LATER\n")
     block = f"{rule}\n{title}\n{rule}\n{body}"
     request = {"model": "m", "messages": [
@@ -110,13 +114,16 @@ def test_exact_reconstruction_strips_cleanly(patch_capture):
     result = on_llm_request(
         request=request, session_id="s2", platform="cli", provider="custom",
         base_url="http://127.0.0.1:8391/v1", api_mode="chat_completions", model="m")
-    assert result is None  # diverged file: nothing provable, block intact
-    final = request
-    # Header-length slicing requires the slice to match a fed candidate; a
-    # diverged file cannot prove the frozen snapshot was fully removed, so
-    # the block stays INTACT (never partial) and the execution boundary
-    # BLOCKS (fail closed, round-#3 Astra F3.C).
-    assert "SECRET-ENTRY-ONE" in str(final)
+    # bounded history: the pre-save file version the session observed proves
+    # the frozen snapshot, so the block strips EXACTLY (availability fix,
+    # round-#4 Opus F2) and nothing memory-bearing reaches the provider.
+    assert result is not None
+    final = result["request"]
+    assert "SECRET-ENTRY-ONE" not in str(final)
+    # the snapshot block is fully removed (header + exact body); the newer
+    # entry lives in the FILE, never in the frozen snapshot, so nothing of it
+    # was on the wire to begin with
+    assert "ENTRY-SAVED-LATER" not in str(final)
 
     def next_call(req):
         return "provider-answer"
@@ -125,7 +132,7 @@ def test_exact_reconstruction_strips_cleanly(patch_capture):
         request=final, session_id="s2", platform="cli", provider="custom",
         base_url="http://127.0.0.1:8391/v1", api_mode="chat_completions",
         model="m", next_call=next_call)
-    assert out != "provider-answer"
+    assert out == "provider-answer"  # clean: no residue, nothing blocked
 
 
 # --- HIGH-3: preset CLI through the REAL parser ------------------------------
