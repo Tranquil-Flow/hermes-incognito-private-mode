@@ -101,15 +101,23 @@ def test_cli_preset_never_grants_consent(patch_capture):
 
 
 def test_status_shows_profile_line(patch_capture, capsys):
-    from ipm.presets import apply_preset
+    from ipm.presets import apply_preset, PRESETS
     from ipm.settings import DEFAULTS
     from hermes_cli.plugins_state import save_plugin_setting
 
-    for key, value in apply_preset("complete", dict(DEFAULTS)).items():
-        save_plugin_setting("incognito-private-mode", (key,), value)
-    from ipm import commands as commands_mod
-    class Args:
-        ipm_command = "status"
-    commands_mod.cli_handler(Args, paths=patch_capture)
-    out = capsys.readouterr().out
-    assert "Profile: complete" in out
+    # the applied preset persists to the shared harness config: restore after
+    saved = {k: DEFAULTS[k] for k in PRESETS["complete"].keys()}
+    try:
+        for key, value in apply_preset("complete", dict(DEFAULTS)).items():
+            save_plugin_setting("incognito-private-mode", (key,), value)
+        from ipm import commands as commands_mod
+
+        class Args:
+            ipm_command = "status"
+
+        commands_mod.cli_handler(Args, paths=patch_capture)
+        out = capsys.readouterr().out
+        assert "Profile: complete" in out
+    finally:
+        for key, value in saved.items():
+            save_plugin_setting("incognito-private-mode", (key,), value)

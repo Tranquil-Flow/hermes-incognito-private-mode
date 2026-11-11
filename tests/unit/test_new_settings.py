@@ -33,18 +33,25 @@ def test_plaintext_remote_blocked(patch_capture):
 
 
 def test_plaintext_loopback_allowed(patch_capture):
+    from hermes_cli.plugins_state import save_plugin_setting
     from ipm.enforce import on_llm_execution
-    seen = {}
+    # self-contained: a strict (allow_unverified=false) harness config would
+    # otherwise block this warn-labelled loopback route
+    save_plugin_setting("incognito-private-mode", ("allow_unverified",), True)
+    try:
+        seen = {}
 
-    def next_call(request):
-        seen["called"] = True
-        return "ok"
+        def next_call(request):
+            seen["called"] = True
+            return "ok"
 
-    kwargs = _kwargs({"model": "m", "messages": [{"role": "user", "content": "hi"}]},
-                     "http://127.0.0.1:8391/v1")
-    kwargs["next_call"] = next_call
-    assert on_llm_execution(**kwargs) == "ok"
-    assert seen.get("called") is True
+        kwargs = _kwargs({"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                         "http://127.0.0.1:8391/v1")
+        kwargs["next_call"] = next_call
+        assert on_llm_execution(**kwargs) == "ok"
+        assert seen.get("called") is True
+    finally:
+        save_plugin_setting("incognito-private-mode", ("allow_unverified",), True)
 
 
 def test_plaintext_remote_allowed_when_opted_in(patch_capture):
