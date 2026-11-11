@@ -50,10 +50,45 @@ def _lock_path(data_dir: Path) -> Path:
     return Path(data_dir) / "store.lock"
 
 
+# Reentrancy registry: {(thread ident, data_dir path): depth}. flock is NOT
+# reentrant within a process (a second open+flock self-deadlocks), which is
+# exactly why the delete fence could not hold the lock across the destructive
+# call: core fires our own session-delete hook synchronously inside
+# delete_session. Per-thread, per-dir reentrancy lets OUR hooks nest while
+# other threads/processes still serialize on the flock.
+_reentrancy_lock = threading.Lock()
+_held_locks: dict[tuple[int, str], int] = {}
+
+
 @contextmanager
 def store_lock(data_dir: Path, blocking: bool = True):
-    """Cross-process RMW lock keyed by the captured data dir (profile-safe, §2.6)."""
+    """Cross-process RMW lock keyed by the captured data dir (profile-safe, §2.6).
+
+    Reentrant within one thread for the SAME data dir (our hooks fire inside
+    core callbacks that run while we hold the lock); cross-thread and
+    cross-process callers still serialize on the flock, so a concurrent
+    keep/off landing can never interleave with a fence that holds the lock.
+    """
     data_dir = Path(data_dir)
+    token = (threading.get_ident(), str(data_dir))
+    with _reentrancy_lock:
+        depth = _held_locks.get(token, 0)
+    # NEVER hold _reentrancy_lock across the yield: the caller's body (and any
+    # nested store_lock from our own hooks) runs while this generator is
+    # suspended — holding it here would self-deadlock the nesting it enables.
+    if depth > 0:
+        with _reentrancy_lock:
+            _held_locks[token] = depth + 1
+        try:
+            yield True
+        finally:
+            with _reentrancy_lock:
+                left = _held_locks[token] - 1
+                if left <= 0:
+                    _held_locks.pop(token, None)
+                else:
+                    _held_locks[token] = left
+        return
     data_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
     fd = os.open(_lock_path(data_dir), os.O_RDWR | os.O_CREAT, 0o600)
@@ -64,9 +99,17 @@ def store_lock(data_dir: Path, blocking: bool = True):
         except BlockingIOError:
             yield False
             return
+        with _reentrancy_lock:
+            _held_locks[token] = _held_locks.get(token, 0) + 1
         try:
             yield True
         finally:
+            with _reentrancy_lock:
+                left = _held_locks.get(token, 1) - 1
+                if left <= 0:
+                    _held_locks.pop(token, None)
+                else:
+                    _held_locks[token] = left
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)

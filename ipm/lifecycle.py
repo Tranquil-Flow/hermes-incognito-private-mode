@@ -810,13 +810,18 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
     decided only from FRESH state.
 
     0. Targets + DB handle are prepared OUTSIDE the plugin's store lock.
-    1. Under the ledger lock: re-read settings, consent and the generation
-       (lock-free reads; nothing here mutates meta — nested flocks deadlock)
+    1. Holding the store lock from admission through the destructive call and
+       the absence verification: re-read settings, consent and the generation
        and admit EVERY target against the fresh ledger (_fence_admission). A
        permanent refusal tombstones the lineage excluded (never retried, never
        widened later). Admission sets a 'deleting' intent flag on every target
-       (our own on_session_delete hook, fired inside delete_session, skips them).
-    2. Lock released: the fenced destructive call (expected-ids fence).
+       (our own session-delete hook, fired inside delete_session, skips them).
+       The lock is REENTRANT per thread (store.py), so our own hooks and
+       mutate calls nest safely; a concurrent keep/off landing from another
+       thread or process blocks on the flock until the fence completes — its
+       keep is ordered AFTER the deletion (a defined linearization, not a
+       racy window).
+    2. The fenced destructive call (expected-ids fence) under the same hold.
     3. Verify exact-id absence per target; mark ONLY verified-absent targets.
     """
     from . import store
@@ -857,52 +862,53 @@ def fenced_delete(raw_id: str, key: str, ledger: dict[str, Any] | None, paths: C
                 l[store.hash_session_id(target)]["deleting"] = True
             return l  # mutate persists the dict it returns — flags must survive
 
-        store.mutate("ledger", paths.data_dir, check)
-        if not decision["ok"]:
-            logger.debug("ipm: delete refused (%s)", decision["why"])  # fixed vocabulary, no ids
-            return "refused"
-        try:
-            deleted = db.delete_session(
-                raw_id, sessions_dir=None,
-                expected_delete_ids=targets,
-                exclude_active_write_guards=True,
-            )
-        except Exception:
-            self_clear(paths, [store.hash_session_id(t) for t in targets])
-            logger.debug("ipm: fenced delete raised (guard/refusal)")
-            return "refused"
+        with store.store_lock(paths.data_dir):  # admission + delete + verify: one hold
+            store.mutate("ledger", paths.data_dir, check)
+            if not decision["ok"]:
+                logger.debug("ipm: delete refused (%s)", decision["why"])  # fixed vocabulary, no ids
+                return "refused"
+            try:
+                deleted = db.delete_session(
+                    raw_id, sessions_dir=None,
+                    expected_delete_ids=targets,
+                    exclude_active_write_guards=True,
+                )
+            except Exception:
+                self_clear(paths, [store.hash_session_id(t) for t in targets])
+                logger.debug("ipm: fenced delete raised (guard/refusal)")
+                return "refused"
+            if not deleted:
+                self_clear(paths, [store.hash_session_id(t) for t in targets])
+                return "refused"
+            # 3. Verify exact-id absence before marking (§3.3), same hold.
+            states = {t: read_row_checked(paths.db_path, t)[0] for t in targets}
+            gone = [t for t in targets if states[t] == "absent"]
+            still = [t for t in targets if states[t] == "present"]
+            if still:
+                self_clear(paths, [store.hash_session_id(t) for t in still])
+            # 'error' targets keep their intent flag: residue recovery verifies them later.
+            if gone:
+                cleanup_session_files(paths, gone)
+                gone_hashes = {store.hash_session_id(t) for t in gone}
+
+                def mark(l: dict[str, Any]) -> dict[str, Any]:
+                    for h in gone_hashes:
+                        member = l.get(h)
+                        if isinstance(member, dict) and member.get("deleting"):
+                            member["state"] = "deleted"
+                            member["deleted_at"] = time.time()
+                            member["deleted_how"] = "fenced"
+                            member.pop("deleting", None)
+                            member.pop("raw_id", None)  # deleted tombstones keep no raw ids
+                    return l
+
+                store.mutate("ledger", paths.data_dir, mark)
+                flush_wal(paths.db_path)
     finally:
         try:
             db.close()
         except Exception:
             pass
-    if not deleted:
-        self_clear(paths, [store.hash_session_id(t) for t in targets])
-        return "refused"
-    # 3. Verify exact-id absence before marking (§3.3).
-    states = {t: read_row_checked(paths.db_path, t)[0] for t in targets}
-    gone = [t for t in targets if states[t] == "absent"]
-    still = [t for t in targets if states[t] == "present"]
-    if still:
-        self_clear(paths, [store.hash_session_id(t) for t in still])
-    # 'error' targets keep their intent flag: residue recovery verifies them later.
-    if gone:
-        cleanup_session_files(paths, gone)
-        gone_hashes = {store.hash_session_id(t) for t in gone}
-
-        def mark(l: dict[str, Any]) -> dict[str, Any]:
-            for h in gone_hashes:
-                member = l.get(h)
-                if isinstance(member, dict) and member.get("deleting"):
-                    member["state"] = "deleted"
-                    member["deleted_at"] = time.time()
-                    member["deleted_how"] = "fenced"
-                    member.pop("deleting", None)
-                    member.pop("raw_id", None)  # deleted tombstones keep no raw ids
-            return l
-
-        store.mutate("ledger", paths.data_dir, mark)
-        flush_wal(paths.db_path)
     return "deleted" if raw_id in gone else "refused"
 
 

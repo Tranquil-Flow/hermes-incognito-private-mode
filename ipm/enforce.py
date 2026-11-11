@@ -145,6 +145,27 @@ def _anthropic_auth_hint(request: dict[str, Any], api_mode: str | None) -> str |
     return "api_key"
 
 
+_CONTENT_KEYS = ("messages", "input", "prompt", "system", "instructions",
+                 "contents", "context", "tools", "tool_choice")
+
+
+def _content_free_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Strip every content-bearing field from a request (round-#3 close-out:
+    for an api_mode with no synthetic response shape, the only guaranteed
+    fail-closed move is sending a request that carries NOTHING: whatever the
+    transport or provider does with it, no user content can leave)."""
+    scrubbed = dict(request)
+    for k in _CONTENT_KEYS:
+        v = scrubbed.get(k)
+        if isinstance(v, list):
+            scrubbed[k] = []
+        elif isinstance(v, str):
+            scrubbed[k] = ""
+        elif v is not None:
+            scrubbed.pop(k, None)  # unknown-typed content field: drop it
+    return scrubbed
+
+
 def _classify(request: dict[str, Any], kwargs: dict[str, Any], settings: dict[str, Any],
               confirmations: dict[str, Any], phase: str, paths: Any = None) -> routes_mod.RouteVerdict:
     provider = kwargs.get("provider")
@@ -342,7 +363,8 @@ def on_llm_execution(**kwargs: Any):
 
     On an INTERNAL error we fail CLOSED where the transport allows a synthetic
     block: an unchecked request to a training route is worse than a failed
-    turn. Pass-through remains only for api_modes with no synthetic shape.
+    turn. api_modes with no synthetic shape get a CONTENT-FREE request (the
+    turn fails downstream, but zero user content leaves the process).
     next_call is invoked exactly once, OUTSIDE the guarded section: a downstream
     provider error must propagate as-is (never re-run the call, never swallow).
     """
@@ -449,22 +471,28 @@ def on_llm_execution(**kwargs: Any):
             except Exception:
                 pass
             return shaped
-        # Unknown api_mode with no shape at all: documented limitation —
-        # core's middleware is fail-open for callback results, so the only
-        # honest options are pass-through or a broken turn. Recorded in the
-        # audit log; disclosed in the README.
-        logger.debug("ipm: llm_execution re-check skipped (no synthetic shape)")
+        # Unknown api_mode with no response shape: send a CONTENT-FREE request
+        # through the chain (round-#3 close-out). The turn fails downstream
+        # with a provider/transport error, but zero user content leaves the
+        # process — fail-closed without knowing the response schema.
+        logger.debug("ipm: llm_execution internal error -> content-free scrub")
         try:
             _audit_append(capture_paths(), {
                 "provider": kwargs.get("provider"), "host": "", "scheme": "",
-                "label": "internal-error-unshaped", "policy": "fail-open-documented",
-                "blocked": False, "persona": None,
+                "label": "internal-error-unshaped", "policy": "fail-closed-content-free",
+                "blocked": True, "persona": None,
             })
         except Exception:
             pass
-        return next_call(request)
+        return next_call(_content_free_request(request))
     if block_message is not None:
-        return synthetic.block_response(api_mode, block_message)
+        shaped = synthetic.block_response(api_mode, block_message)
+        if shaped is not None:
+            return shaped
+        # Unknown api_mode, positive block: send a CONTENT-FREE request — the
+        # turn fails downstream with zero user content on the wire.
+        logger.debug("ipm: block with no synthetic shape -> content-free scrub")
+        return next_call(_content_free_request(request))
     return next_call(payload)
 
 

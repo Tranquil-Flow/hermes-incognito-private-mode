@@ -212,3 +212,47 @@ def test_ascii_retry_stripped_rules_still_block(world):
     result, seen = send(payload)
     assert result != "sent" and seen == []
     assert "SNAPSHOT-ASCII-TAIL" in str(payload)  # intact, not sent
+
+
+def test_unknown_api_mode_internal_error_scrubs_content(world, monkeypatch):
+    """Round-#3 close-out: an api_mode with no synthetic response shape must
+    still fail closed — an internal error sends a CONTENT-FREE request through
+    the chain (the turn errors downstream; nothing user-bearing leaves)."""
+    from ipm import enforce
+
+    paths, _settings = world
+    def boom(_p=None):
+        raise RuntimeError("settings unavailable")
+    monkeypatch.setattr(enforce, "read_settings", boom)
+
+    seen: list = []
+    payload = {"messages": [{"role": "user", "content": "SECRET-CONTENT"}],
+               "model": "m", "api_mode": "mystery"}
+    out = enforce.on_llm_execution(
+        request=payload, session_id="scrub", platform="cli", provider="custom",
+        base_url="http://127.0.0.1:8391/v1", api_mode="mystery", model="m",
+        next_call=lambda req: seen.append(req) or "provider-answer")
+    # next_call's return propagates: in production the provider rejects the
+    # empty request and the turn fails downstream with nothing leaked.
+    assert len(seen) == 1
+    sent = seen[0]
+    assert sent.get("messages") == []  # content-free
+    assert "SECRET-CONTENT" not in str(sent)
+
+
+def test_unknown_api_mode_positive_block_scrubs_content(world):
+    """A positive block (training route) under a shapeless mode must not pass
+    the original request through either."""
+    from ipm import enforce
+
+    seen: list = []
+    paths, settings = world
+    settings["allow_unverified"] = False  # strict: warn routes block
+    payload = {"messages": [{"role": "user", "content": "SECRET-BLOCKED"}],
+               "model": "m"}
+    out = enforce.on_llm_execution(
+        request=payload, session_id="scrub-block", platform="cli", provider="mystery-provider",
+        base_url="https://attacker.example/v1", api_mode="mystery", model="m",
+        next_call=lambda req: seen.append(req) or "provider-answer")
+    assert len(seen) == 1 and seen[0].get("messages") == []
+    assert "SECRET-BLOCKED" not in str(seen[0])

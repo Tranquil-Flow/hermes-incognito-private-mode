@@ -535,3 +535,96 @@ def test_unadmitted_closes_never_starve_the_batch(world):
     lifecycle.run_sweep(p, batch_limit=2)
     assert not present(p, "after-stuck")
     assert all(present(p, f"stuck-{i}") for i in range(3))
+
+
+# --- round-#3 close-out: fence holds the lock across the destructive call -------
+
+def test_store_lock_reenters_same_thread_blocks_other_threads(tmp_path):
+    """flock is not reentrant in-process; the per-thread/per-dir reentrancy lets
+    our own hooks nest (they fire inside core callbacks we hold the lock for),
+    while other threads still serialize."""
+    from ipm import store as _store
+    import threading as _t
+
+    inner = []
+    with _store.store_lock(tmp_path):
+        with _store.store_lock(tmp_path):  # same thread: no self-deadlock
+            inner.append(1)
+    assert inner == [1]
+
+    release = _t.Event()
+    acquired = _t.Event()
+
+    def holder():
+        with _store.store_lock(tmp_path):
+            acquired.set()
+            release.wait(5)
+
+    t = _t.Thread(target=holder, daemon=True)
+    t.start()
+    assert acquired.wait(5)
+    got = []
+    with _store.store_lock(tmp_path, blocking=False) as locked:
+        got.append(locked)  # other thread holds it: non-blocking must report False
+    assert got == [False]
+    release.set()
+    t.join(5)
+
+
+def test_keep_landing_during_fenced_delete_is_ordered_after_it(world, monkeypatch):
+    """The keep-race sliver (round-#3 close-out): a keep arriving while the
+    fence holds the lock is BLOCKED until the fence completes. It can never
+    interleave between admission and the destructive call; under the old
+    lock-release window this test's keep completed mid-delete and the row was
+    deleted anyway."""
+    import threading as _t
+    from ipm import store as _store
+    from hermes_state import SessionDB
+
+    p = world.paths
+    armed_open(world, "race-keep")
+    close_row(p, "race-keep", "cli_close")
+
+    started = _t.Event()
+    real_delete = SessionDB.delete_session
+
+    def slow_delete(self, *a, **k):
+        started.set()
+        _t.Event().wait(0.5)  # destructive call in flight while the lock is held
+        return real_delete(self, *a, **k)
+
+    monkeypatch.setattr(SessionDB, "delete_session", slow_delete)
+
+    outcomes: dict = {}
+    from ipm.store import hash_session_id
+
+    def fence():
+        outcomes["rc"] = lifecycle.fenced_delete("race-keep", hash_session_id("race-keep"), None, p)
+
+    fence_thread = _t.Thread(target=fence, daemon=True)
+    fence_thread.start()
+    assert started.wait(timeout=5)
+
+    keep_done = _t.Event()
+
+    def keep_lander():
+        def set_keep(l):
+            member = l.get(hash_session_id("race-keep"))
+            if isinstance(member, dict):
+                member["keep_override"] = "keep"
+            return l
+        _store.mutate("ledger", p.data_dir, set_keep)
+        keep_done.set()
+
+    keep_thread = _t.Thread(target=keep_lander, daemon=True)
+    keep_thread.start()
+    keep_thread.join(0.3)
+    # THE assertion: with the fence holding the lock, the keep cannot complete
+    # mid-delete. (Old code: flock free between check and delete -> keep lands
+    # and the row is deleted anyway.)
+    assert keep_thread.is_alive(), "keep landed while the fence held the lock"
+    fence_thread.join(timeout=15)
+    assert not fence_thread.is_alive()
+    assert outcomes.get("rc") == "deleted"
+    assert keep_done.wait(timeout=5)  # keep lands AFTER the fence (ordered)
+    assert not present(p, "race-keep")
