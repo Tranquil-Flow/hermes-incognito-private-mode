@@ -50,10 +50,10 @@ def test_strip_fallback_is_flagged_ambiguous():
     text = _render(entries)
     strip.reset_memory_bodies()  # no reconstruction source available
     out, n, amb = strip.strip_memory_blocks_checked(text)
-    assert n == 1
+    assert n == 0  # UNPROVABLE: block kept verbatim, never partially stripped
     assert amb is True  # caller must fail closed (enforce blocks the request)
-    # fallback boundary cannot be trusted: residue is expected; blocking is the fix
-    assert "SECRET-PARA-2" in out
+    assert "SECRET-PARA-2" in out  # intact — the header survives for the recheck
+    assert strip.has_memory_block(out)
 
 
 def test_unpaired_context_tag_is_residue():

@@ -42,6 +42,36 @@ def block_response(api_mode: str | None, text: str) -> Any:
             )
     except Exception as exc:  # fail closed
         logger.debug("ipm: synthetic construction failed (%s)", type(exc).__name__)
+    return block_response_dict(api_mode, text)
+
+
+def block_response_dict(api_mode: str | None, text: str) -> Any:
+    """SDK-independent dict fallback for the three known modes. A plain dict is
+    serializable by every OpenAI/Anthropic transport, so an internal-error
+    block can be delivered even when SDK construction fails (round-#3 Astra
+    F5: shaping failure must never fall through to the provider)."""
+    if not text:
+        text = "Blocked by private mode."
+    if api_mode == "chat_completions":
+        return {
+            "id": f"ipm-{uuid.uuid4().hex[:24]}", "object": "chat.completion",
+            "created": int(time.time()), "model": "private-mode-block",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": text}}],
+        }
+    if api_mode == "codex_responses":
+        return {
+            "id": f"resp_{uuid.uuid4().hex[:24]}", "object": "response",
+            "created_at": time.time(), "model": "private-mode-block",
+            "status": "completed", "parallel_tool_calls": False,
+            "tool_choice": "none", "tools": [],
+            "output": [{"type": "message", "role": "assistant", "status": "completed",
+                        "id": f"msg_{uuid.uuid4().hex[:24]}",
+                        "content": [{"type": "output_text", "text": text, "annotations": []}]}],
+        }
+    if api_mode == "anthropic_messages":
+        return {"role": "assistant", "stop_reason": "end_turn", "usage": None,
+                "content": [{"type": "text", "text": text}]}
     return None
 
 

@@ -41,7 +41,7 @@ _BLOCK_TEMPLATE = (
     "Switch model or use /private off for this chat."
 )
 
-_memory_bodies_cache: dict[str, Any] = {"sig": None, "bodies": []}
+_memory_bodies_cache: tuple = ((), [])
 
 # Ambiguity signal from the llm_request strip pass, consumed by the same
 # thread's llm_execution (request and execution hooks run sequentially on one
@@ -57,7 +57,14 @@ def _confirmations(data_dir) -> dict[str, Any]:
 
 def _memory_bodies(paths) -> list[str]:
     """Entry bodies of MEMORY.md / USER.md as core renders them (exact
-    strip-reconstruction sources). Cached on (path, size, mtime_ns)."""
+    strip-reconstruction sources). Cached as ONE tuple so no reader can pair a
+    new signature with stale bodies (round-#3 review: cache race).
+
+    Core's file format is entries joined by '\n§\n' — no title line in the
+    FILE (the title exists only in the rendered prompt block). Core reads with
+    utf-8-sig (strips BOM) and dedups entries preserving order.
+    """
+    global _memory_bodies_cache
     sig = []
     texts = []
     for attr in ("memory_path", "user_profile_path"):
@@ -67,27 +74,28 @@ def _memory_bodies(paths) -> list[str]:
         try:
             st = p.stat()
             sig.append((str(p), st.st_size, st.st_mtime_ns))
-            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+            texts.append(p.read_text(encoding="utf-8-sig", errors="replace"))
         except Exception:
             sig.append((str(p), None, None))
     key = tuple(sig)
-    if _memory_bodies_cache["sig"] == key:
-        return _memory_bodies_cache["bodies"]
+    cached_sig, cached_bodies = _memory_bodies_cache
+    if cached_sig == key:
+        return cached_bodies
     bodies: list[str] = []
-    from .strip import MEMORY_TITLE_RE
-
     for text in texts:
         segments = text.split("\n§\n")
-        # The file's first segment is the BLOCK TITLE (core renders
-        # rule\nTITLE\nrule\n + entries joined by \n§\n) — not an entry.
-        if segments and MEMORY_TITLE_RE.match(segments[0].split("\n")[0].strip()):
-            segments = segments[1:]
         entries = [e.strip() for e in segments]
         entries = [e for e in entries if e]
-        if entries:
-            bodies.append("\n§\n".join(entries))
-    _memory_bodies_cache["sig"] = key
-    _memory_bodies_cache["bodies"] = bodies
+        if not entries:
+            continue
+        # core-cleaned: dedup preserving order (dict.fromkeys, as core does)
+        cleaned = "\n§\n".join(dict.fromkeys(entries))
+        if cleaned not in bodies:
+            bodies.append(cleaned)
+        raw = "\n§\n".join(entries)
+        if raw != cleaned and raw not in bodies:
+            bodies.append(raw)
+    _memory_bodies_cache = (key, bodies)
     return bodies
 
 
@@ -138,14 +146,15 @@ def _anthropic_auth_hint(request: dict[str, Any], api_mode: str | None) -> str |
 
 
 def _classify(request: dict[str, Any], kwargs: dict[str, Any], settings: dict[str, Any],
-              confirmations: dict[str, Any], phase: str) -> routes_mod.RouteVerdict:
+              confirmations: dict[str, Any], phase: str, paths: Any = None) -> routes_mod.RouteVerdict:
     provider = kwargs.get("provider")
     base_url = kwargs.get("base_url")
     api_mode = kwargs.get("api_mode")
     model = kwargs.get("model")
     auth_hint = _anthropic_auth_hint(request, api_mode)
+    profile = routes_mod.profile_scope(getattr(paths, "home", None)) if paths is not None else ""
     verdict = routes_mod.classify(provider, base_url, api_mode, model, auth_hint,
-                                  confirmations, None)
+                                  confirmations, None, profile=profile)
     return verdict
 
 
@@ -193,6 +202,33 @@ def _audit_append(paths: Any, record: dict[str, Any]) -> None:
         logger.debug("ipm: audit append failed (%s)", type(exc).__name__)
 
 
+def _persona_in_payload(payload, persona: str) -> bool:
+    """True when the persona text appears in any text surface of the request
+    (instructions/system/messages/input). Never uses json.dumps: its escaping
+    hides newlines/non-ASCII, which made multi-line personas report 'absent'
+    while on the wire (round-#3 Astra F7)."""
+    try:
+        from .strip import content_texts
+        needle = " ".join(persona[:120].split())
+        surfaces: list[Any] = []
+        if isinstance(payload, dict):
+            surfaces.append(payload.get("instructions"))
+            surfaces.append(payload.get("system"))
+            messages = payload.get("messages")
+            if isinstance(messages, list):
+                surfaces.extend(m.get("content") for m in messages if isinstance(m, dict))
+            inp = payload.get("input")
+            if isinstance(inp, list):
+                surfaces.extend(i.get("content") for i in inp if isinstance(i, dict))
+        for surface in surfaces:
+            for text in content_texts(surface):
+                if needle in " ".join(text.split()):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def _persona_text(paths: Any) -> str | None:
     """The user's SOUL.md content as the loader normalizes it (stripped)."""
     try:
@@ -224,6 +260,8 @@ def _plaintext_block_reason(kwargs: dict[str, Any], settings: dict[str, Any]) ->
 def on_llm_request(**kwargs: Any):
     """``llm_request`` middleware. Returns {"request": new} or None."""
     try:
+        _strip_state.ambiguous = False  # no stale signal from a prior request
+        _strip_state.persona_stripped = None  # stale flag could skip the strip
         request = kwargs.get("request")
         if not isinstance(request, dict):
             return None
@@ -231,6 +269,21 @@ def on_llm_request(**kwargs: Any):
         settings = read_settings(paths)
         ledger, entry = _session_state(kwargs.get("session_id"), paths.data_dir)
         if not provider_controls_active(settings, entry):
+            # §3.3: record that this chat observed an OFF period — a chat that
+            # ever ran unprotected is never deleted later (round-#3 review:
+            # arm -> off -> close -> on ended in a deletion).
+            if entry is not None and kwargs.get("session_id"):
+                from . import store as _store
+
+                def _mark_off(l: dict, _sid: str = str(kwargs.get("session_id"))) -> dict:
+                    e = l.get(_store.hash_session_id(_sid))
+                    if isinstance(e, dict) and e.get("state") in {"armed", "candidate"}:
+                        e["observed_off"] = True
+                    return l
+                try:
+                    _store.mutate("ledger", paths.data_dir, _mark_off)
+                except Exception:
+                    pass
             return None
         # Lazy observation for sessions we never saw start: tombstone only (§3.3).
         session_id = kwargs.get("session_id")
@@ -238,11 +291,10 @@ def on_llm_request(**kwargs: Any):
         if session_id and entry is None:
             _lazy_exclude(str(session_id), platform, paths.data_dir)
 
-        _strip_state.ambiguous = False  # no stale signal from a prior request
         new_request = request
         trace: dict[str, Any] = {"source": "incognito-private-mode", "applied": []}
         confirmations = _confirmations(paths.data_dir)
-        verdict = _classify(new_request, kwargs, settings, confirmations, "request")
+        verdict = _classify(new_request, kwargs, settings, confirmations, "request", paths)
 
         # 1. Provider flags (PER_REQUEST routes we implement).
         if verdict.flags.get("kind") == "provider_routing" and not transforms.flags_present(new_request):
@@ -255,9 +307,8 @@ def on_llm_request(**kwargs: Any):
         # are fed from the captured memory files so multi-paragraph entries are
         # removed whole (blank lines inside entries are legal in core).
         if _memory_strip_active(settings, entry):
-            strip_mod.set_memory_bodies(_memory_bodies(paths))
-            new_request, counts = strip_mod.strip_request(new_request)
-            strip_mod.reset_memory_bodies()
+            new_request, counts = strip_mod.strip_request(
+                new_request, bodies=_memory_bodies(paths))
             _strip_state.ambiguous = bool(counts.get("ambiguous"))
             if counts["blocks"] or counts["spans"]:
                 trace["applied"].append(
@@ -310,7 +361,7 @@ def on_llm_execution(**kwargs: Any):
             payload = request  # passthrough
         else:
             confirmations = _confirmations(paths.data_dir)
-            verdict = _classify(request, kwargs, settings, confirmations, "execution")
+            verdict = _classify(request, kwargs, settings, confirmations, "execution", paths)
 
             plaintext_reason = _plaintext_block_reason(kwargs, settings)
             if plaintext_reason:
@@ -341,24 +392,21 @@ def on_llm_execution(**kwargs: Any):
                         "(exact reconstruction failed)")
 
             persona_state = None
+            already = getattr(_strip_state, "persona_stripped", None)
+            _strip_state.persona_stripped = None  # consume unconditionally
             if settings.get("strip_persona", False) and block_message is None:
-                already = getattr(_strip_state, "persona_stripped", None)
-                _strip_state.persona_stripped = None  # consume
-                if already:
-                    persona_state = "stripped"  # llm_request already replaced it
-                else:
-                    persona = _persona_text(paths)
-                    if persona:
-                        payload, n = strip_mod.replace_persona_span(payload, persona)
-                        if n:
-                            persona_state = "stripped"
-                        else:
-                            # distinguish 'not in this request' from 'present but unremovable'
-                            persona_state = ("present-not-located"
-                                             if persona[:120] in json.dumps(payload)[:20000]
-                                             else "absent")
+                persona = _persona_text(paths)
+                if persona and _persona_in_payload(payload, persona):
+                    payload, n = strip_mod.replace_persona_span(payload, persona)
+                    if n and not _persona_in_payload(payload, persona):
+                        persona_state = "stripped"
                     else:
-                        persona_state = "absent"
+                        persona_state = "present-not-located"  # fail toward honesty
+                elif persona and already:
+                    # stripped in llm_request; verified absent from THIS payload
+                    persona_state = "stripped"
+                else:
+                    persona_state = "absent"
             elif settings.get("strip_persona", False):
                 persona_state = "absent"
 
@@ -380,8 +428,14 @@ def on_llm_execution(**kwargs: Any):
         # upstream middleware already applied flags/strip on that copy).
         synthetic_msg = "Blocked by private mode: the private-mode check could not run."
         shaped = synthetic.block_response(api_mode, synthetic_msg)
+        if shaped is None:
+            # SDK construction failed: dict fallback for the three known modes
+            # (round-#3 Astra F5 — a shaping failure must NEVER reach the
+            # provider; internal errors are fail-closed, not fail-open).
+            shaped = synthetic.block_response_dict(api_mode, synthetic_msg)
         if shaped is not None:
-            logger.debug("ipm: llm_execution internal error -> synthetic block")
+            logger.debug("ipm: llm_execution internal error -> synthetic block",
+                         exc_info=True)
             try:
                 _audit_append(capture_paths(), {
                     "provider": kwargs.get("provider"),
@@ -395,7 +449,19 @@ def on_llm_execution(**kwargs: Any):
             except Exception:
                 pass
             return shaped
+        # Unknown api_mode with no shape at all: documented limitation —
+        # core's middleware is fail-open for callback results, so the only
+        # honest options are pass-through or a broken turn. Recorded in the
+        # audit log; disclosed in the README.
         logger.debug("ipm: llm_execution re-check skipped (no synthetic shape)")
+        try:
+            _audit_append(capture_paths(), {
+                "provider": kwargs.get("provider"), "host": "", "scheme": "",
+                "label": "internal-error-unshaped", "policy": "fail-open-documented",
+                "blocked": False, "persona": None,
+            })
+        except Exception:
+            pass
         return next_call(request)
     if block_message is not None:
         return synthetic.block_response(api_mode, block_message)
@@ -406,6 +472,12 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
     """True when a strip pass could not prove full removal (multi-paragraph
     entries under a fallback boundary, or unpaired context tags)."""
     try:
+        def _text_residue(text: str) -> bool:
+            if not isinstance(text, str):
+                return False
+            return (strip_mod.span_residue(text)
+                    or strip_mod.has_memory_block(text)
+                    or strip_mod.memory_title_residue(text))
         messages = payload.get("messages")
         if isinstance(messages, list):
             for i, msg in enumerate(messages):
@@ -414,15 +486,22 @@ def _strip_ambiguous(payload: dict[str, Any]) -> bool:
                 if strip_mod.is_system_message(msg, i) and strip_mod.has_memory_block(
                         str(msg.get("content")) if isinstance(msg.get("content"), str) else ""):
                     return True  # header survived a strip pass
-                if strip_mod.is_user_message(msg) and isinstance(msg.get("content"), str):
-                    if strip_mod.span_residue(msg["content"]):
-                        return True
+                if strip_mod.is_user_message(msg):
+                    for text in strip_mod.content_texts(msg.get("content")):
+                        if _text_residue(text):
+                            return True
         inp = payload.get("input")
         if isinstance(inp, list):
             for item in inp:
-                if isinstance(item, dict) and item.get("role") == "user" and isinstance(item.get("content"), str):
-                    if strip_mod.span_residue(item["content"]):
-                        return True
+                if isinstance(item, dict) and item.get("role") == "user":
+                    for text in strip_mod.content_texts(item.get("content")):
+                        if _text_residue(text):
+                            return True
+        system = payload.get("system")
+        if system is not None:
+            for text in strip_mod.content_texts(system):
+                if strip_mod.memory_title_residue(text):
+                    return True
     except Exception:
         return False
     return False

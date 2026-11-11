@@ -51,8 +51,19 @@ class PrivateLogFilter(logging.Filter):
                 return True
             self._redact(record)
         except Exception:
-            pass  # fail open: the record passes through unmodified
+            # Fail CLOSED (§2.4): a redaction failure must not pass potentially
+            # content-bearing text through unmodified (round-#3 Astra review).
+            self._content_free(record)
         return True  # we redact in place; never drop records
+
+    def _content_free(self, record: logging.LogRecord) -> None:
+        """Replace a record's content with a fixed marker (fail-closed path)."""
+        try:
+            record.msg = "[redacted: private mode]"
+            record.args = None
+            self.redacted += 1
+        except Exception:
+            pass
 
     def _redact(self, record: logging.LogRecord) -> None:
         args = record.args
@@ -76,6 +87,7 @@ class PrivateLogFilter(logging.Filter):
         try:
             rendered = record.getMessage()
         except Exception:
+            self._content_free(record)  # unrenderable = unknown content: fail closed
             return
         if record.name == "hermes.tool_calls":
             # Nuke EVERYTHING after the '<ts>  <tool>:' prefix: quoted-preview
@@ -104,7 +116,7 @@ def _mode_active_from_settings() -> bool:
 
         return read_settings().get("mode") != "off"
     except Exception:
-        return False
+        return True  # fail closed: unreadable settings -> assume protection active
 
 
 _shared_filter: PrivateLogFilter | None = None

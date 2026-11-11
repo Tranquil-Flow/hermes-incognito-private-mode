@@ -2,7 +2,23 @@
 
 import copy
 
+import pytest
+
 from ipm import strip, transforms
+
+
+@pytest.fixture(autouse=True)
+def _memory_sources():
+    """Block fixtures mirror production: enforce feeds the current file bodies
+    (title-skip removed — files are entries-only)."""
+    strip.set_memory_bodies([
+        "User: literal docs/gaps; team Qs last.\n\u00a7\nAstra: ~/Projects/Astra-Hermes/.",
+        "Evi (she/her)/Tranquil-Flow.",
+    ])
+    try:
+        yield
+    finally:
+        strip.reset_memory_bodies()
 
 RULE = "═" * 46
 BLOCK = (

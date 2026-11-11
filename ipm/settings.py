@@ -122,6 +122,11 @@ def read_settings(paths: CapturedPaths | None = None) -> dict[str, Any]:
         settings.update(_settings_entry(config))
     except Exception as exc:  # fail closed to defaults, log content-free
         logger.debug("ipm: settings read failed (%s)", type(exc).__name__)
+        # An unreadable config must not silently WIDEN deletion: defaults carry
+        # remove_history_on_close=True, which would drop a user's explicit
+        # keep_history:true / narrowed surfaces (round-#3 lifecycle worker).
+        settings["remove_history_on_close"] = False
+        settings["apply_to_platforms"] = []
     settings = _validated(settings)
     with _cache_lock:
         _config_cache["mtime"] = cache_key

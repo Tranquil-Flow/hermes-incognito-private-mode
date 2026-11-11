@@ -40,14 +40,14 @@ _MEMORY_TAG_CLOSE_RE = re.compile(r"<\s*/\s*memory-context\s*>", re.IGNORECASE)
 
 _ENTRY_DELIMITER = "\n§\n"
 
-# Bodies of the memory blocks as core would render them, fed by enforce from the
-# captured memory files (mtime-cached there). Each element is the joined entry
-# body ('entry1\n§\nentry2').
+# Module-global bodies kept ONLY for the legacy set/reset API; enforce passes
+# bodies as an argument per call (the global was a cross-thread race: one
+# thread's reset emptied it while another was mid-strip — round-#3 review).
 _memory_bodies: list[str] = []
 
 
 def set_memory_bodies(bodies: list[str]) -> None:
-    """Feed candidate block bodies (exact-reconstruction sources)."""
+    """Legacy feed for candidate block bodies. Prefer the bodies= argument."""
     global _memory_bodies
     try:
         _memory_bodies = [b for b in (bodies or []) if isinstance(b, str) and b]
@@ -60,13 +60,30 @@ def reset_memory_bodies() -> None:
     _memory_bodies = []
 
 
-def _render_candidates(title_line: str) -> list[str]:
+# Core's header usage line carries the EXACT snapshot body length:
+# "NN% — X/Y chars" where X == len(snapshot body) (memory_tool_store.py:644).
+_USAGE_LEN_RE = re.compile(r"\u2014\s*([\d,]+)\s*/")
+
+
+def _snapshot_len(title_line: str) -> int | None:
+    """Exact snapshot body length from the header's usage figure, or None."""
+    m = _USAGE_LEN_RE.search(title_line)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _render_candidates(title_line: str, bodies: list[str] | None = None) -> list[str]:
     """Exact block texts to search for, given the concrete header line seen in
     the prompt. Percent/char formatting is taken from the prompt itself, so we
     only need the body to match."""
     rule = "═" * 46
+    src_bodies = bodies if bodies is not None else _memory_bodies
     out: list[str] = []
-    for body in _memory_bodies:
+    for body in src_bodies:
         out.append(f"{rule}\n{title_line}\n{rule}\n{body}")
     return out
 
@@ -98,12 +115,14 @@ def strip_memory_blocks(text: str) -> tuple[str, int]:
     return out, count
 
 
-def strip_memory_blocks_checked(text: str) -> tuple[str, int, bool]:
+def strip_memory_blocks_checked(text: str, bodies: list[str] | None = None) -> tuple[str, int, bool]:
     """Remove whole blocks; returns (text, count, ambiguous).
 
-    ``ambiguous=True`` means a memory header was present and the entries may
-    NOT have been fully removed (blank lines inside entries make a purely
-    textual end boundary untrustworthy). The caller must fail closed.
+    ``bodies``: exact-reconstruction candidates from the captured memory files
+    (per-call argument — never shared mutable state across threads).
+
+    ``ambiguous=True`` means a memory header was present and the body could not
+    be proven fully removed. The caller must fail closed.
     """
     if not isinstance(text, str) or not text:
         return text, 0, False
@@ -115,52 +134,80 @@ def strip_memory_blocks_checked(text: str) -> tuple[str, int, bool]:
     if not starts:
         return text, 0, False
 
+    # Plan spans against the ORIGINAL text (never the already-edited result):
+    # nested/later headers would otherwise be measured with stale offsets and
+    # over-consume neighbouring system text (round-#3 Astra F3.B).
+    result = text
     ambiguous = False
     removed = 0
-    result = text
-    # Process from the last block backwards so indices stay valid.
-    for start in reversed(starts):
+    accepted: list[tuple[int, int]] = []
+    for start in starts:  # ascending: outer blocks precede nested ones
         title_line = lines[start + 1].strip()
-        rule = "═" * 46
-        header_end = result.find(f"{rule}\n{title_line}\n{rule}\n")
-        if header_end == -1:
-            continue
-        body_start = header_end + len(f"{rule}\n{title_line}\n{rule}\n")
-        span_end = -1
-        # PRIMARY: exact reconstruction from the fed bodies.
-        for cand in _render_candidates(title_line):
-            idx = result.find(cand, header_end)
-            if idx == header_end:
-                span_end = header_end + len(cand)
+        rule = "\u2550" * 46
+        header = f"{rule}\n{title_line}\n{rule}\n"
+        header_start = text.find(header, max(accepted[-1][1] if accepted else 0, 0))
+        # locate this block's header at/after the previous accepted span
+        search_from = 0
+        header_start = -1
+        while True:
+            header_start = text.find(header, search_from)
+            if header_start == -1:
                 break
-        if span_end == -1:
-            # FALLBACK: entries up to the first blank line; flag ambiguity
-            # (core entries MAY contain blank lines).
-            sub_lines = lines  # line indices align with the ORIGINAL text only
-            # recompute in result-space: walk lines of result from body_start
-            rlines = result.split("\n")
-            # find body_start line index
-            pos = 0
-            bi = 0
-            for bi, ln in enumerate(rlines):
-                if pos + len(ln) + 1 > body_start:
+            span = (header_start, header_start + len(header))
+            if not any(s <= span[0] < e for s, e in accepted):
+                break
+            search_from = header_start + 1
+        if header_start == -1:
+            continue
+        body_start = header_start + len(header)
+        body_end = -1
+        # PRIMARY: header-length snapshot, but ONLY when the sliced body
+        # matches a fed candidate (proof of authentic core framing). A prompt
+        # supplied length alone cannot prove complete removal: a forged short
+        # header would otherwise forward the remainder (round-#3 Astra F3.C).
+        snap_len = _snapshot_len(title_line)
+        if snap_len is not None:
+            end = body_start + snap_len
+            if end <= len(text) and (end == len(text) or text[end] == "\n"):
+                body_slice = text[body_start:end]
+                if body_slice in (bodies if bodies is not None else _memory_bodies):
+                    body_end = end
+        # SECONDARY: exact reconstruction from fed bodies (cleaned + raw).
+        # Candidates are FULL blocks (header+body), so they anchor at the
+        # header start, not the body start.
+        if body_end == -1:
+            for cand in _render_candidates(title_line, bodies):
+                if text.startswith(cand, header_start):
+                    body_end = header_start + len(cand)
                     break
-                pos += len(ln) + 1
-            end_i = len(rlines)
-            for j in range(bi + 1, len(rlines)):
-                if rlines[j].strip() == "":
-                    end_i = j
-                    break
-                if RULE_RE.match(rlines[j].strip()):
-                    end_i = j
-                    break
-            span_end = len("\n".join(rlines[:end_i])) if end_i else 0
-            if end_i < len(rlines):
-                span_end += 1  # the newline joining end_i-1 and end_i
+        if body_end == -1:
+            # UNPROVABLE: keep the block verbatim; ambiguity flags it. A
+            # partial fallback strip would both leak the tail and destroy the
+            # header the final recheck needs (round-#3 Astra F3).
             ambiguous = True
-        result = _remove_span(result, header_end, span_end)
+            continue
+        accepted.append((header_start, body_end))
         removed += 1
+    # Remove accepted spans descending (non-overlapping by construction).
+    for header_start, body_end in sorted(accepted, reverse=True):
+        result = _remove_span(result, header_start, body_end)
     return result, removed, ambiguous
+
+
+def memory_title_residue(text: str) -> bool:
+    """True when a recognizable memory-title line exists WITHOUT its Unicode
+    rule framing (or with the framing stripped by core's ASCII-retry
+    sanitization). Such text may carry memory content that the rule-anchored
+    stripper cannot see — callers must treat it as ambiguous and block
+    (round-#3 Astra F3.A)."""
+    if not isinstance(text, str) or not text:
+        return False
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if MEMORY_TITLE_RE.match(line.strip()):
+            if i == 0 or not RULE_RE.match(lines[i - 1].strip()):
+                return True
+    return False
 
 
 def _find_well_ordered_span(text: str, from_pos: int = 0) -> tuple[int, int] | None:
@@ -257,7 +304,7 @@ def is_system_message(msg: Any, index: int) -> bool:
     return index == 0 and isinstance(msg, dict) and msg.get("role") in ("system", "developer")
 
 
-def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+def strip_request(request: dict[str, Any], bodies: list[str] | None = None) -> tuple[dict[str, Any], dict[str, int]]:
     """Strip a full request (chat_completions / codex_responses / anthropic_messages
     shapes). Copy-on-write: returns the ORIGINAL object when nothing was removed.
     Counts: {blocks, spans, ambiguous}."""
@@ -273,7 +320,7 @@ def strip_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
         return new_request
 
     def strip_system(text: str) -> str:
-        text2, n, amb = strip_memory_blocks_checked(text)
+        text2, n, amb = strip_memory_blocks_checked(text, bodies)
         counts["blocks"] += n
         if amb:
             counts["ambiguous"] += 1
@@ -445,7 +492,10 @@ def replace_persona_span(request: dict[str, Any], persona_text: str) -> tuple[di
                 text2 = sub(content)
                 if text2 != content:
                     set_message(i, {**msg, "content": text2})
-            if isinstance(content, list):
+            if isinstance(content, list) and msg.get("role") in ("system", "developer"):
+                # system/developer surfaces only: rewriting user/assistant/tool
+                # text blocks silently altered quoted persona text and inflated
+                # the strip count (round-#3 review).
                 new_blocks: list[Any] | None = None
                 for bi, part in enumerate(content):
                     if isinstance(part, dict) and isinstance(part.get("text"), str):

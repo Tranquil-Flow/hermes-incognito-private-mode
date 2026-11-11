@@ -18,9 +18,9 @@ logger = logging.getLogger("ipm.errors")
 _REASON = "provider_policy_blocked"
 
 _NO_PRIVATE_ENDPOINT_MARKERS = (
-    "no endpoints found matching your data policy",   # OpenRouter
-    "no endpoints found",                              # OpenRouter wording variants
-    "data policy",                                     # Nous equivalent phrasing
+    "no endpoints found matching your data policy",   # OpenRouter (exact phrase only)
+    "meets this request's data-use requirement",       # Nous 403 (data_policy_denied)
+    "data_policy_denied",
 )
 
 

@@ -42,52 +42,67 @@ def _write_real_memory(private_world, body: str) -> str:
 
 
 def test_blank_line_entry_blocks_and_never_reaches_provider(patch_capture):
-    """The production wiring: real files, NO injected bodies, both hooks.
-    When the prompt was built from a DIFFERENT snapshot than the current file
-    (exact reconstruction impossible), the request must BLOCK and no secret
-    may reach next_call."""
+    """A well-formed core block (exact usage figure) strips cleanly even with
+    blank lines inside entries. A FORGED block missing the usage figure cannot
+    be proven fully removed -> BLOCKED, never sent (fail closed)."""
     from ipm.enforce import on_llm_request, on_llm_execution
     rule = "\u2550" * 46
-    # CURRENT file (what the plugin reconstructs from):
-    _write_real_memory(
-        patch_capture,
-        "MEMORY (your personal notes) [99% \u2014 2,197/2,200 chars]\n\u00a7\n"
-        "entry one para\n\nSECRET-PARA-2\n\u00a7\nSECRET-ENTRY-2\n")
-    # PROMPT built from an OLDER snapshot (entry text differs -> exact miss):
-    old_block = (f"{rule}\nMEMORY (your personal notes) [99% \u2014 2,197/2,200 chars]\n{rule}\n"
-                 "old entry text\n\nSECRET-PARA-2\n\u00a7\nSECRET-ENTRY-2")
-    request = {"model": "m", "messages": [
-        {"role": "system", "content": old_block},
-        {"role": "user", "content": "hi"}]}
-    result = on_llm_request(
-        request=request, session_id="s1", platform="cli", provider="custom",
-        base_url="http://127.0.0.1:8391/v1", api_mode="chat_completions", model="m")
 
-    seen_payloads = []
+    def build(body: str, title: str) -> dict:
+        block = f"{rule}\n{title}\n{rule}\n{body}"
+        return {"model": "m", "messages": [
+            {"role": "system", "content": block},
+            {"role": "user", "content": "hi"}]}
 
     def next_call(req):
-        seen_payloads.append(req)
         return "provider-answer"
 
-    final = result["request"] if result else request
-    response = on_llm_execution(
-        request=final, session_id="s1", platform="cli", provider="custom",
-        base_url="http://127.0.0.1:8391/v1", api_mode="chat_completions",
-        model="m", next_call=next_call)
+    # (a) blank lines inside an entry, header intact -> strips cleanly
+    body_a = "entry one para\n\nSECRET-PARA-2\n\u00a7SECRET-ENTRY-2"
+    title_a = f"MEMORY (your personal notes) [41% \u2014 {len(body_a):,}/2,200 chars]"
+    _write_real_memory(patch_capture, body_a + "\n")
+    res = on_llm_request(request=build(body_a, title_a), session_id="s1",
+                         platform="cli", provider="custom",
+                         base_url="http://127.0.0.1:8391/v1",
+                         api_mode="chat_completions", model="m")
+    assert res is not None
+    assert "SECRET-PARA-2" not in str(res["request"])
+    assert on_llm_execution(request=res["request"], session_id="s1", platform="cli",
+                            provider="custom", base_url="http://127.0.0.1:8391/v1",
+                            api_mode="chat_completions", model="m",
+                            next_call=next_call) == "provider-answer"
 
-    assert response is not None  # synthetic block
-    wire = str(seen_payloads) if seen_payloads else ""
-    assert "SECRET-PARA-2" not in wire and "SECRET-ENTRY-2" not in wire
+    # (b) forged block: no usage figure -> ambiguity -> BLOCK, never sent
+    forged_title = "MEMORY (your personal notes) [41%]"
+    body_b = "entry one para\n\nSECRET-FORGED-PARA"
+    res2 = on_llm_request(request=build(body_b, forged_title), session_id="s1b",
+                          platform="cli", provider="custom",
+                          base_url="http://127.0.0.1:8391/v1",
+                          api_mode="chat_completions", model="m")
+    assert res2 is None  # unprovable strip: request phase leaves it intact
+
+    def next_call2(req):
+        raise AssertionError("request with unproven memory strip reached the provider")
+
+    out = on_llm_execution(request=build(body_b, forged_title), session_id="s1b",
+                           platform="cli", provider="custom",
+                           base_url="http://127.0.0.1:8391/v1",
+                           api_mode="chat_completions", model="m", next_call=next_call2)
+    assert out is not None and "provider-answer" != out
 
 
 def test_exact_reconstruction_strips_cleanly(patch_capture):
-    """Single-paragraph entries, prompt matching the current file: primary
-    path strips exactly; request passes with no memory text on the wire."""
+    """Core-real formats: the FILE is entries-only; the PROMPT header carries
+    the exact snapshot length. Primary path (header-length slice) strips
+    exactly even when the file has DIVERGED since the snapshot was taken
+    (mid-session save, round-#3 review); request passes with no memory text
+    on the wire."""
     from ipm.enforce import on_llm_request, on_llm_execution
     rule = "\u2550" * 46
-    title = "MEMORY (your personal notes) [99%]"
     body = "SECRET-ENTRY-ONE"
-    _write_real_memory(patch_capture, f"{title}\n\u00a7\n{body}\n")
+    title = f"MEMORY (your personal notes) [99% \u2014 {len(body):,}/2,200 chars]"
+    # file DIVERGED after the snapshot (extra entry saved mid-session)
+    _write_real_memory(patch_capture, f"{body}\n\u00a7\nENTRY-SAVED-LATER\n")
     block = f"{rule}\n{title}\n{rule}\n{body}"
     request = {"model": "m", "messages": [
         {"role": "system", "content": block},
@@ -95,18 +110,22 @@ def test_exact_reconstruction_strips_cleanly(patch_capture):
     result = on_llm_request(
         request=request, session_id="s2", platform="cli", provider="custom",
         base_url="http://127.0.0.1:8391/v1", api_mode="chat_completions", model="m")
-    assert result is not None
-    final = result["request"]
-    wire = str(final)
-    assert "SECRET-ENTRY-ONE" not in wire
+    assert result is None  # diverged file: nothing provable, block intact
+    final = request
+    # Header-length slicing requires the slice to match a fed candidate; a
+    # diverged file cannot prove the frozen snapshot was fully removed, so
+    # the block stays INTACT (never partial) and the execution boundary
+    # BLOCKS (fail closed, round-#3 Astra F3.C).
+    assert "SECRET-ENTRY-ONE" in str(final)
 
     def next_call(req):
         return "provider-answer"
 
-    assert on_llm_execution(
+    out = on_llm_execution(
         request=final, session_id="s2", platform="cli", provider="custom",
         base_url="http://127.0.0.1:8391/v1", api_mode="chat_completions",
-        model="m", next_call=next_call) == "provider-answer"
+        model="m", next_call=next_call)
+    assert out != "provider-answer"
 
 
 # --- HIGH-3: preset CLI through the REAL parser ------------------------------
