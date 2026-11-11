@@ -230,6 +230,9 @@ def classify(provider: str | None, base_url: str | None, api_mode: str | None = 
             reasons.append(account_setting)
     elif worst == "UNKNOWN":
         reasons.append("no curated route matches this endpoint")
+    elif worst == "UNVERIFIED":
+        reasons.append("retention/training policy unverified for this provider — "
+                       "treat all chat content as retained")
     if _loopback_host(host) and label in {"ok", "confirmed"}:
         # Audit fix: a loopback endpoint may be a proxy (LiteLLM, port-forward,
         # relay) forwarding to ANY remote provider — never report ✅/ALREADY.
